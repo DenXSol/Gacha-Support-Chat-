@@ -1,3 +1,10 @@
+export interface MessagePart {
+  author_type: 'user' | 'admin' | 'bot';
+  author_name: string;
+  body: string;
+  created_at: string;
+}
+
 export interface Conversation {
   id: string;
   user_id: string;
@@ -9,8 +16,17 @@ export interface Conversation {
   created_at: string;
   updated_at: string;
   last_message: string;
+  full_messages?: MessagePart[];
   unread: boolean;
   replied: boolean;
+  tags?: string[];
+  // AI fields (populated after analysis)
+  ai_summary?: string;
+  ai_priority?: 'low' | 'medium' | 'high' | 'urgent';
+  ai_priority_reason?: string;
+  ai_sentiment?: 'positive' | 'neutral' | 'frustrated' | 'angry';
+  ai_suggested_reply?: string;
+  ai_action_needed?: boolean;
 }
 
 export interface Analytics {

@@ -12,7 +12,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const success = await sendReply(conversationId, message, 'comment');
+    // FIX: was passing 'comment' as adminId (wrong) — now passes real admin ID
+    const success = await sendReply(conversationId, message, '10591515');
 
     if (!success) {
       return NextResponse.json(
