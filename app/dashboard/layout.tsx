@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, usePathname } from 'next/navigation';
 import Link from 'next/link';
 
 export default function DashboardLayout({
@@ -12,10 +12,11 @@ export default function DashboardLayout({
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [loading, setLoading] = useState(true);
   const router = useRouter();
+  const pathname = usePathname();
 
   useEffect(() => {
     const token = localStorage.getItem('auth_token');
-    
+
     if (!token) {
       router.push('/login');
     } else {
@@ -49,6 +50,7 @@ export default function DashboardLayout({
 
   return (
     <div style={{ minHeight: '100vh', background: '#f5f5f5' }}>
+      {/* Header */}
       <header style={{
         background: 'white',
         borderBottom: '1px solid #e0e0e0',
@@ -79,6 +81,56 @@ export default function DashboardLayout({
         </button>
       </header>
 
+      {/* Navigation */}
+      <nav style={{
+        background: 'white',
+        borderBottom: '1px solid #e0e0e0',
+        padding: '0 2rem',
+        display: 'flex',
+        gap: '2rem',
+      }}>
+        <Link href="/dashboard">
+          <a style={{
+            padding: '1rem 0',
+            borderBottom: pathname === '/dashboard' ? '3px solid #3b82f6' : 'none',
+            color: pathname === '/dashboard' ? '#3b82f6' : '#666',
+            fontWeight: pathname === '/dashboard' ? '600' : '400',
+            textDecoration: 'none',
+            cursor: 'pointer',
+            transition: 'all 0.2s',
+          }}>
+            Dashboard
+          </a>
+        </Link>
+        <Link href="/dashboard/conversations">
+          <a style={{
+            padding: '1rem 0',
+            borderBottom: pathname === '/dashboard/conversations' ? '3px solid #3b82f6' : 'none',
+            color: pathname === '/dashboard/conversations' ? '#3b82f6' : '#666',
+            fontWeight: pathname === '/dashboard/conversations' ? '600' : '400',
+            textDecoration: 'none',
+            cursor: 'pointer',
+            transition: 'all 0.2s',
+          }}>
+            Conversations
+          </a>
+        </Link>
+        <Link href="/dashboard/analytics">
+          <a style={{
+            padding: '1rem 0',
+            borderBottom: pathname === '/dashboard/analytics' ? '3px solid #3b82f6' : 'none',
+            color: pathname === '/dashboard/analytics' ? '#3b82f6' : '#666',
+            fontWeight: pathname === '/dashboard/analytics' ? '600' : '400',
+            textDecoration: 'none',
+            cursor: 'pointer',
+            transition: 'all 0.2s',
+          }}>
+            Analytics
+          </a>
+        </Link>
+      </nav>
+
+      {/* Main Content */}
       <main style={{ padding: '2rem' }}>
         {children}
       </main>
