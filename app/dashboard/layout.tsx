@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
-import Link from 'next/link';
 
 export default function DashboardLayout({
   children,
@@ -30,6 +29,12 @@ export default function DashboardLayout({
     localStorage.removeItem('auth_token');
     router.push('/login');
   };
+
+  const navItems = [
+    { href: '/dashboard', label: 'Dashboard' },
+    { href: '/dashboard/conversations', label: 'Conversations' },
+    { href: '/dashboard/analytics', label: 'Analytics' },
+  ];
 
   if (loading) {
     return (
@@ -89,45 +94,25 @@ export default function DashboardLayout({
         display: 'flex',
         gap: '2rem',
       }}>
-        <Link href="/dashboard">
-          <a style={{
-            padding: '1rem 0',
-            borderBottom: pathname === '/dashboard' ? '3px solid #3b82f6' : 'none',
-            color: pathname === '/dashboard' ? '#3b82f6' : '#666',
-            fontWeight: pathname === '/dashboard' ? '600' : '400',
-            textDecoration: 'none',
-            cursor: 'pointer',
-            transition: 'all 0.2s',
-          }}>
-            Dashboard
-          </a>
-        </Link>
-        <Link href="/dashboard/conversations">
-          <a style={{
-            padding: '1rem 0',
-            borderBottom: pathname === '/dashboard/conversations' ? '3px solid #3b82f6' : 'none',
-            color: pathname === '/dashboard/conversations' ? '#3b82f6' : '#666',
-            fontWeight: pathname === '/dashboard/conversations' ? '600' : '400',
-            textDecoration: 'none',
-            cursor: 'pointer',
-            transition: 'all 0.2s',
-          }}>
-            Conversations
-          </a>
-        </Link>
-        <Link href="/dashboard/analytics">
-          <a style={{
-            padding: '1rem 0',
-            borderBottom: pathname === '/dashboard/analytics' ? '3px solid #3b82f6' : 'none',
-            color: pathname === '/dashboard/analytics' ? '#3b82f6' : '#666',
-            fontWeight: pathname === '/dashboard/analytics' ? '600' : '400',
-            textDecoration: 'none',
-            cursor: 'pointer',
-            transition: 'all 0.2s',
-          }}>
-            Analytics
-          </a>
-        </Link>
+        {navItems.map((item) => (
+          <button
+            key={item.href}
+            onClick={() => router.push(item.href)}
+            style={{
+              padding: '1rem 0',
+              borderBottom: pathname === item.href ? '3px solid #3b82f6' : 'none',
+              color: pathname === item.href ? '#3b82f6' : '#666',
+              fontWeight: pathname === item.href ? '600' : '400',
+              background: 'none',
+              border: 'none',
+              cursor: 'pointer',
+              transition: 'all 0.2s',
+              fontSize: '14px',
+            }}
+          >
+            {item.label}
+          </button>
+        ))}
       </nav>
 
       {/* Main Content */}
