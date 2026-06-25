@@ -508,7 +508,7 @@ export default function ConversationsPage() {
                   />
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6 }}>
-                      <span style={{ fontWeight: conv.unread ? 700 : 500, fontSize: 13, color: '#1e293b', truncate: true }}>
+                      <span style={{ fontWeight: conv.unread ? 700 : 500, fontSize: 13, color: '#1e293b', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {conv.user_name}
                         {conv.ai_sentiment && (
                           <span style={{ marginLeft: 4 }}>{SENTIMENT_EMOJI[conv.ai_sentiment]}</span>
