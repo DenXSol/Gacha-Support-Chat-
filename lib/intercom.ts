@@ -28,6 +28,8 @@ export interface IntercomContact {
   email: string;
   custom_attributes?: {
     location?: string;
+    user_id?: string;
+    wallet?: string;
     [key: string]: any;
   };
 }
@@ -35,8 +37,6 @@ export interface IntercomContact {
 const API_BASE = 'https://api.intercom.io';
 const TOKEN = process.env.INTERCOM_API_TOKEN;
 
-// FIX: Added Intercom-Version header (required by newer Intercom API)
-// FIX: Added AbortController for timeout handling
 const getHeaders = () => ({
   Authorization: `Bearer ${TOKEN}`,
   'Content-Type': 'application/json',
@@ -67,12 +67,29 @@ async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutM
   }
 }
 
+// ── Wallet helper ─────────────────────────────────────────────────────────────
+// Intercom stores the wallet address as a custom attribute — check several
+// possible field names before falling back to Intercom's internal contact ID.
+function resolveWallet(contact: IntercomContact | null, fallbackContactId: string): string {
+  if (!contact) return fallbackContactId;
+  const attrs = contact.custom_attributes || {};
+  // Try common field names for wallet address
+  return (
+    attrs.user_id ||
+    attrs.wallet ||
+    attrs.wallet_address ||
+    attrs.eth_address ||
+    attrs.address ||
+    fallbackContactId
+  );
+}
+
 export async function fetchAllConversations(): Promise<IntercomConversation[]> {
   try {
     let allConversations: any[] = [];
     let startingAfter: string | null = null;
     let page = 0;
-    const MAX_PAGES = 10; // safety cap
+    const MAX_PAGES = 10;
 
     while (page < MAX_PAGES) {
       page++;
@@ -101,7 +118,6 @@ export async function fetchAllConversations(): Promise<IntercomConversation[]> {
       }
     }
 
-    // Enrich conversations with contact info
     const enriched = await Promise.all(
       allConversations.map(async (conv) => {
         const contactId = conv.source?.author?.id || conv.contacts?.contacts?.[0]?.id;
@@ -109,7 +125,8 @@ export async function fetchAllConversations(): Promise<IntercomConversation[]> {
 
         return {
           id: conv.id,
-          user_id: contactId || '',
+          // FIX: resolve actual wallet address from custom attributes
+          user_id: resolveWallet(contact, contactId || ''),
           user_name: contact?.name || conv.source?.author?.name || 'Unknown',
           user_email: contact?.email || 'Unknown',
           user_location: contact?.custom_attributes?.location || 'Unknown',
@@ -147,7 +164,8 @@ export async function fetchSingleConversation(conversationId: string): Promise<I
 
     return {
       id: conv.id,
-      user_id: contactId || '',
+      // FIX: resolve actual wallet address from custom attributes
+      user_id: resolveWallet(contact, contactId || ''),
       user_name: contact?.name || conv.source?.author?.name || 'Unknown',
       user_email: contact?.email || 'Unknown',
       user_location: contact?.custom_attributes?.location || 'Unknown',
@@ -202,7 +220,6 @@ export function categorizeConversation(conversation: any): string {
 function extractMessages(conversation: any): MessagePart[] {
   const parts: MessagePart[] = [];
 
-  // First message (source)
   if (conversation.source?.body) {
     parts.push({
       author_type: 'user',
@@ -212,13 +229,12 @@ function extractMessages(conversation: any): MessagePart[] {
     });
   }
 
-  // Conversation parts
   const convParts = conversation.conversation_parts?.conversation_parts || [];
   for (const part of convParts) {
     if (!part.body) continue;
     parts.push({
       author_type: part.author?.type === 'admin' ? 'admin' : 'user',
-      author_name: part.author?.name || (part.author?.type === 'admin' ? 'Support' : 'User'),
+      author_name: part.author?.name || (part.author?.type === 'admin' ? 'TyAi' : 'User'),
       body: part.body,
       created_at: new Date(part.created_at * 1000).toISOString(),
     });
@@ -230,7 +246,6 @@ function extractMessages(conversation: any): MessagePart[] {
 function getLastMessage(conversation: any): string {
   const parts = conversation.conversation_parts?.conversation_parts;
   if (parts && parts.length > 0) {
-    // Get last non-empty part
     for (let i = parts.length - 1; i >= 0; i--) {
       if (parts[i].body) return parts[i].body;
     }
@@ -284,7 +299,6 @@ export async function tagConversation(
   tagName: string
 ): Promise<boolean> {
   try {
-    // First get or create the tag
     const tagsRes = await fetchWithTimeout(`${API_BASE}/tags`);
     const tagsData = await tagsRes.json();
     let tag = tagsData.data?.find((t: any) => t.name === tagName);
@@ -297,7 +311,6 @@ export async function tagConversation(
       tag = await createRes.json();
     }
 
-    // Apply tag to conversation
     const res = await fetchWithTimeout(
       `${API_BASE}/conversations/${conversationId}/tags`,
       {
