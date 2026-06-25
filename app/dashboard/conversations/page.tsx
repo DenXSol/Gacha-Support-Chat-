@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useSearchParams } from 'next/navigation';
 import toast from 'react-hot-toast';
 
@@ -11,6 +11,16 @@ interface MessagePart {
   author_name: string;
   body: string;
   created_at: string;
+}
+
+interface ConvSummary {
+  summary: string;
+  problem: string;
+  current_status: string;
+  next_steps: string[];
+  key_facts: string[];
+  urgency: string;
+  suggested_reply: string;
 }
 
 interface Conversation {
@@ -35,6 +45,7 @@ interface Conversation {
   ai_sentiment?: 'positive' | 'neutral' | 'frustrated' | 'angry';
   ai_suggested_reply?: string;
   ai_action_needed?: boolean;
+  conv_summary?: ConvSummary;
 }
 
 interface TaiMessage {
@@ -47,30 +58,23 @@ interface TaiMessage {
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const ISSUE_COLORS: Record<string, string> = {
-  withdrawal: '#3b82f6',
-  deposit: '#f59e0b',
-  shipping: '#10b981',
-  complaint: '#ef4444',
-  card_redemption: '#8b5cf6',
-  kyc: '#6366f1',
-  general: '#6b7280',
+  withdrawal: '#3b82f6', deposit: '#f59e0b', shipping: '#10b981',
+  complaint: '#ef4444', card_redemption: '#8b5cf6', kyc: '#6366f1', general: '#6b7280',
 };
 
 const PRIORITY_COLORS: Record<string, string> = {
-  urgent: '#ef4444',
-  high: '#f97316',
-  medium: '#f59e0b',
-  low: '#10b981',
+  urgent: '#ef4444', high: '#f97316', medium: '#f59e0b', low: '#10b981',
 };
 
 const SENTIMENT_EMOJI: Record<string, string> = {
-  positive: '😊',
-  neutral: '😐',
-  frustrated: '😤',
-  angry: '😠',
+  positive: '😊', neutral: '😐', frustrated: '😤', angry: '😠',
 };
 
-// ─── Copy chip component ──────────────────────────────────────────────────────
+const STATUS_COLOR: Record<string, string> = {
+  resolved: '#10b981', pending: '#f59e0b', escalation_needed: '#ef4444', waiting_on_user: '#6366f1',
+};
+
+// ─── Copy chip ────────────────────────────────────────────────────────────────
 
 function CopyChip({ label, value, color }: { label: string; value: string; color?: string }) {
   const [copied, setCopied] = useState(false);
@@ -81,19 +85,8 @@ function CopyChip({ label, value, color }: { label: string; value: string; color
     });
   };
   return (
-    <button
-      onClick={copy}
-      title={`Click to copy: ${value}`}
-      style={{
-        display: 'inline-flex', alignItems: 'center', gap: 4,
-        background: copied ? '#dcfce7' : '#f1f5f9',
-        border: `1px solid ${copied ? '#86efac' : '#e2e8f0'}`,
-        borderRadius: 6, padding: '3px 8px', fontSize: 11,
-        color: copied ? '#16a34a' : (color || '#475569'),
-        cursor: 'pointer', fontFamily: 'inherit',
-        transition: 'all 0.15s',
-      }}
-    >
+    <button onClick={copy} title={`Click to copy: ${value}`}
+      style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: copied ? '#dcfce7' : '#f1f5f9', border: `1px solid ${copied ? '#86efac' : '#e2e8f0'}`, borderRadius: 6, padding: '3px 8px', fontSize: 11, color: copied ? '#16a34a' : (color || '#475569'), cursor: 'pointer', fontFamily: 'inherit', transition: 'all 0.15s' }}>
       <span style={{ fontWeight: 600, color: '#94a3b8', marginRight: 2 }}>{label}</span>
       <span style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
         {copied ? '✓ Copied!' : value}
@@ -118,6 +111,17 @@ export default function ConversationsPage() {
   const [newTag, setNewTag] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  // Batch 6 states
+  const [polishing, setPolishing] = useState(false);
+  const [translating, setTranslating] = useState(false);
+  const [summarizing, setSummarizing] = useState(false);
+  const [showSummaryPanel, setShowSummaryPanel] = useState(false);
+  const [showTranslatePanel, setShowTranslatePanel] = useState(false);
+  const [translateTarget, setTranslateTarget] = useState('English');
+  const [translatedText, setTranslatedText] = useState('');
+  const [translatedFrom, setTranslatedFrom] = useState('');
+  const [translateSource, setTranslateSource] = useState<'reply' | 'message'>('reply');
+
   // Filters
   const [issueFilter, setIssueFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
@@ -133,7 +137,7 @@ export default function ConversationsPage() {
   const [showTai, setShowTai] = useState(true);
   const taiEndRef = useRef<HTMLDivElement>(null);
 
-  // ─── Load conversations + handle analytics drill-down ─────────────────────
+  // ─── Load ─────────────────────────────────────────────────────────────────
 
   const loadConversations = async () => {
     setLoading(true);
@@ -142,7 +146,6 @@ export default function ConversationsPage() {
       const data = await res.json();
       if (data.success) {
         setConversations(data.data);
-        // Apply issue filter from analytics drill-down URL param
         const issueParam = searchParams.get('issue');
         if (issueParam) {
           setIssueFilter(issueParam);
@@ -154,27 +157,21 @@ export default function ConversationsPage() {
       } else {
         toast.error('Failed to load conversations');
       }
-    } catch {
-      toast.error('Error loading conversations');
-    } finally {
-      setLoading(false);
-    }
+    } catch { toast.error('Error loading conversations'); }
+    finally { setLoading(false); }
   };
 
   useEffect(() => { loadConversations(); }, []);
 
-  // ─── Lazy load full thread when conversation is selected ──────────────────
+  // ─── Lazy load thread ─────────────────────────────────────────────────────
 
   const selectConversation = async (conv: Conversation) => {
-    if (selected?.id === conv.id) {
-      setSelected(null);
-      return;
-    }
-    // Show immediately with whatever we have
+    if (selected?.id === conv.id) { setSelected(null); return; }
     setSelected(conv);
-    // If we already have full messages, skip fetch
+    setShowSummaryPanel(false);
+    setShowTranslatePanel(false);
+    setTranslatedText('');
     if (conv.full_messages && conv.full_messages.length > 1) return;
-
     setLoadingThread(true);
     try {
       const res = await fetch(`/api/intercom/fetch-single-conversation?id=${conv.id}`);
@@ -184,29 +181,23 @@ export default function ConversationsPage() {
         setSelected(updated);
         setConversations(prev => prev.map(c => c.id === conv.id ? updated : c));
       }
-    } catch {
-      // silently fail — we still show what we have
-    } finally {
-      setLoadingThread(false);
-    }
+    } catch { }
+    finally { setLoadingThread(false); }
   };
 
-  // Scroll to bottom of messages when thread loads
   useEffect(() => {
     if (selected?.full_messages) {
       setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
     }
   }, [selected?.full_messages?.length]);
 
-  // ─── Filtering ─────────────────────────────────────────────────────────────
+  // ─── Filtering ────────────────────────────────────────────────────────────
 
   useEffect(() => {
     let result = [...conversations];
-
     if (issueFilter) result = result.filter(c => c.issue_type === issueFilter);
     if (statusFilter) result = result.filter(c => c.status === statusFilter);
     if (priorityFilter) result = result.filter(c => c.ai_priority === priorityFilter);
-
     if (searchMode === 'keyword' && searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
       result = result.filter(c =>
@@ -219,7 +210,6 @@ export default function ConversationsPage() {
         (c.custom_tags || []).some(t => t.toLowerCase().includes(q))
       );
     }
-
     result.sort((a, b) => {
       const pOrder: Record<string, number> = { urgent: 0, high: 1, medium: 2, low: 3 };
       const ap = a.ai_priority ? pOrder[a.ai_priority] : 4;
@@ -227,11 +217,10 @@ export default function ConversationsPage() {
       if (ap !== bp) return ap - bp;
       return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
     });
-
     setFiltered(result);
   }, [conversations, issueFilter, statusFilter, priorityFilter, searchQuery, searchMode]);
 
-  // ─── Manual tags ───────────────────────────────────────────────────────────
+  // ─── Tags ─────────────────────────────────────────────────────────────────
 
   const addTag = (tag: string) => {
     if (!selected || !tag.trim()) return;
@@ -250,7 +239,7 @@ export default function ConversationsPage() {
     setConversations(prev => prev.map(c => c.id === selected.id ? updated : c));
   };
 
-  // ─── Tai AI Assistant ──────────────────────────────────────────────────────
+  // ─── Tai ─────────────────────────────────────────────────────────────────
 
   useEffect(() => { taiEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [taiMessages]);
 
@@ -260,110 +249,66 @@ export default function ConversationsPage() {
     setTaiInput('');
     setTaiMessages(prev => [...prev, { role: 'user', text: question, timestamp: new Date().toISOString() }]);
     setTaiLoading(true);
-
     try {
       const searchData = conversations.map(c => ({
         id: c.id,
         text: `User: ${c.user_name} | Email: ${c.user_email} | Wallet: ${c.user_id} | Location: ${c.user_location} | Issue: ${c.issue_type} | Message: ${c.last_message} | Status: ${c.status}`,
         user: c.user_name,
       }));
-
       const res = await fetch('/api/claude/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: question, conversations: searchData }),
       });
-
       const data = await res.json();
       if (data.success && data.results.length > 0) {
         const matchIds = new Set(data.results.map((r: any) => r.id));
         const matchedConvs = conversations.filter(c => matchIds.has(c.id));
-        const summary = data.results.slice(0, 5)
-          .map((r: any) => {
-            const conv = conversations.find(c => c.id === r.id);
-            return conv ? `• ${conv.user_name} (${conv.user_email}) — ${r.reason}` : null;
-          }).filter(Boolean).join('\n');
-
-        setTaiMessages(prev => [...prev, {
-          role: 'tai',
-          text: `Found ${data.results.length} match${data.results.length !== 1 ? 'es' : ''} for "${question}":\n\n${summary}`,
-          matches: matchedConvs.slice(0, 5),
-          timestamp: new Date().toISOString(),
-        }]);
+        const summary = data.results.slice(0, 5).map((r: any) => {
+          const conv = conversations.find(c => c.id === r.id);
+          return conv ? `• ${conv.user_name} (${conv.user_email}) — ${r.reason}` : null;
+        }).filter(Boolean).join('\n');
+        setTaiMessages(prev => [...prev, { role: 'tai', text: `Found ${data.results.length} match${data.results.length !== 1 ? 'es' : ''} for "${question}":\n\n${summary}`, matches: matchedConvs.slice(0, 5), timestamp: new Date().toISOString() }]);
       } else {
-        setTaiMessages(prev => [...prev, {
-          role: 'tai',
-          text: `No conversations found matching "${question}". Try different keywords.`,
-          timestamp: new Date().toISOString(),
-        }]);
+        setTaiMessages(prev => [...prev, { role: 'tai', text: `No conversations found matching "${question}". Try different keywords.`, timestamp: new Date().toISOString() }]);
       }
     } catch {
       setTaiMessages(prev => [...prev, { role: 'tai', text: 'Error — please try again.', timestamp: new Date().toISOString() }]);
-    } finally {
-      setTaiLoading(false);
-    }
+    } finally { setTaiLoading(false); }
   };
 
-  // ─── AI Search ─────────────────────────────────────────────────────────────
+  // ─── AI Search ────────────────────────────────────────────────────────────
 
   const handleAiSearch = async () => {
     if (!searchQuery.trim()) return;
     setAiSearching(true);
     try {
       const searchData = conversations.map(c => ({
-        id: c.id,
-        text: `${c.user_name} ${c.user_email} ${c.user_id} ${c.issue_type} ${c.last_message} ${c.user_location}`,
-        user: c.user_name,
+        id: c.id, text: `${c.user_name} ${c.user_email} ${c.user_id} ${c.issue_type} ${c.last_message} ${c.user_location}`, user: c.user_name,
       }));
-      const res = await fetch('/api/claude/search', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: searchQuery, conversations: searchData }),
-      });
+      const res = await fetch('/api/claude/search', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query: searchQuery, conversations: searchData }) });
       const data = await res.json();
       if (data.success && data.results.length > 0) {
         const matchIds = new Set(data.results.map((r: any) => r.id));
         setFiltered(conversations.filter(c => matchIds.has(c.id)));
         toast.success(`Found ${data.results.length} conversations`);
       } else {
-        toast('No matches found', { icon: '🔍' });
-        setFiltered([]);
+        toast('No matches found', { icon: '🔍' }); setFiltered([]);
       }
-    } catch {
-      toast.error('AI search failed');
-    } finally {
-      setAiSearching(false);
-    }
+    } catch { toast.error('AI search failed'); }
+    finally { setAiSearching(false); }
   };
 
-  // ─── AI Analysis ───────────────────────────────────────────────────────────
+  // ─── AI Analyze ───────────────────────────────────────────────────────────
 
   const analyzeConversation = async (conv: Conversation) => {
     setAnalyzingId(conv.id);
     try {
-      const text = conv.full_messages
-        ?.map(m => `[${m.author_type === 'admin' ? 'TyAi' : m.author_name}]: ${m.body}`)
-        .join('\n') || conv.last_message;
-
-      const res = await fetch('/api/claude/analyze-conversation', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ conversationText: text, userName: conv.user_name }),
-      });
+      const text = conv.full_messages?.map(m => `[${m.author_type === 'admin' ? 'Tai' : m.author_name}]: ${m.body}`).join('\n') || conv.last_message;
+      const res = await fetch('/api/claude/analyze-conversation', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ conversationText: text, userName: conv.user_name }) });
       const data = await res.json();
       if (data.success) {
-        const updated = conversations.map(c =>
-          c.id === conv.id ? {
-            ...c,
-            ai_summary: data.data.summary,
-            ai_priority: data.data.priority,
-            ai_priority_reason: data.data.priority_reason,
-            ai_sentiment: data.data.sentiment,
-            ai_suggested_reply: data.data.suggested_reply,
-            ai_action_needed: data.data.action_needed,
-            issue_type: data.data.issue_type || c.issue_type,
-          } : c
-        );
+        const updated = conversations.map(c => c.id === conv.id ? { ...c, ai_summary: data.data.summary, ai_priority: data.data.priority, ai_priority_reason: data.data.priority_reason, ai_sentiment: data.data.sentiment, ai_suggested_reply: data.data.suggested_reply, ai_action_needed: data.data.action_needed, issue_type: data.data.issue_type || c.issue_type } : c);
         setConversations(updated);
         if (selected?.id === conv.id) setSelected(updated.find(c => c.id === conv.id) || null);
         toast.success('Analysis complete');
@@ -379,33 +324,101 @@ export default function ConversationsPage() {
     for (const conv of toAnalyze) await analyzeConversation(conv);
   };
 
-  // ─── Reply ─────────────────────────────────────────────────────────────────
+  // ─── BATCH 6: Polish reply ────────────────────────────────────────────────
+
+  const polishReply = async () => {
+    if (!replyText.trim()) { toast.error('Type something first'); return; }
+    setPolishing(true);
+    try {
+      const context = selected?.full_messages?.slice(-3).map(m => `${m.author_name}: ${m.body}`).join('\n');
+      const res = await fetch('/api/claude/polish-reply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: replyText, context }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setReplyText(data.polished);
+        toast.success('Reply polished ✨');
+      } else {
+        toast.error('Could not polish reply');
+      }
+    } catch { toast.error('Polish failed'); }
+    finally { setPolishing(false); }
+  };
+
+  // ─── BATCH 6: Translate ───────────────────────────────────────────────────
+
+  const translate = async (source: 'reply' | 'message') => {
+    const textToTranslate = source === 'reply' ? replyText : (selected?.full_messages?.slice(-1)[0]?.body || selected?.last_message || '');
+    if (!textToTranslate?.trim()) { toast.error('Nothing to translate'); return; }
+    setTranslating(true);
+    setTranslateSource(source);
+    setShowTranslatePanel(true);
+    try {
+      const res = await fetch('/api/claude/translate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: textToTranslate, targetLanguage: source === 'message' ? 'English' : translateTarget, autoDetect: source === 'message' }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setTranslatedText(data.translated);
+        setTranslatedFrom(data.detectedLanguage || '');
+      } else {
+        toast.error('Translation failed');
+      }
+    } catch { toast.error('Translation failed'); }
+    finally { setTranslating(false); }
+  };
+
+  // ─── BATCH 6: Summarize ───────────────────────────────────────────────────
+
+  const summarizeConversation = async () => {
+    if (!selected) return;
+    setSummarizing(true);
+    setShowSummaryPanel(true);
+    try {
+      const text = selected.full_messages?.map(m => `[${m.author_type === 'admin' ? 'Tai' : m.author_name}]: ${m.body}`).join('\n') || selected.last_message;
+      const res = await fetch('/api/claude/summarize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ conversationText: text, userName: selected.user_name, issueType: selected.issue_type }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        const updated = { ...selected, conv_summary: data.data };
+        setSelected(updated);
+        setConversations(prev => prev.map(c => c.id === selected.id ? updated : c));
+      } else {
+        toast.error('Summary failed');
+        setShowSummaryPanel(false);
+      }
+    } catch { toast.error('Summary failed'); setShowSummaryPanel(false); }
+    finally { setSummarizing(false); }
+  };
+
+  // ─── Reply ────────────────────────────────────────────────────────────────
 
   const sendReply = async () => {
     if (!selected || !replyText.trim()) return;
     setSendingReply(true);
     try {
-      const res = await fetch('/api/intercom/send-reply', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ conversationId: selected.id, message: replyText }),
-      });
+      const res = await fetch('/api/intercom/send-reply', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ conversationId: selected.id, message: replyText }) });
       const data = await res.json();
       if (data.success) {
         toast.success('Reply sent!');
-        const newMsg: MessagePart = { author_type: 'admin', author_name: 'TyAi', body: replyText, created_at: new Date().toISOString() };
+        const newMsg: MessagePart = { author_type: 'admin', author_name: 'Tai', body: replyText, created_at: new Date().toISOString() };
         const updatedSelected = { ...selected, replied: true, full_messages: [...(selected.full_messages || []), newMsg] };
         setSelected(updatedSelected);
         setConversations(prev => prev.map(c => c.id === selected.id ? updatedSelected : c));
         setReplyText('');
-      } else {
-        toast.error('Failed to send reply');
-      }
+      } else { toast.error('Failed to send reply'); }
     } catch { toast.error('Error sending reply'); }
     finally { setSendingReply(false); }
   };
 
-  // ─── Bulk actions ──────────────────────────────────────────────────────────
+  // ─── Bulk ─────────────────────────────────────────────────────────────────
 
   const toggleSelect = (id: string) => setSelectedIds(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
   const selectAll = () => setSelectedIds(prev => prev.size === filtered.length ? new Set() : new Set(filtered.map(c => c.id)));
@@ -413,25 +426,17 @@ export default function ConversationsPage() {
   const exportCSV = () => {
     const toExport = selectedIds.size > 0 ? filtered.filter(c => selectedIds.has(c.id)) : filtered;
     const headers = ['ID', 'User', 'Email', 'Wallet', 'Location', 'Issue Type', 'Status', 'Priority', 'Sentiment', 'Tags', 'Last Message', 'AI Summary'];
-    const rows = toExport.map(c => [
-      c.id, c.user_name, c.user_email, c.user_id, c.user_location,
-      c.issue_type, c.status, c.ai_priority || '', c.ai_sentiment || '',
-      (c.custom_tags || []).join(';'),
-      `"${(c.last_message || '').replace(/"/g, '""').substring(0, 200)}"`,
-      `"${(c.ai_summary || '').replace(/"/g, '""')}"`,
-    ]);
+    const rows = toExport.map(c => [c.id, c.user_name, c.user_email, c.user_id, c.user_location, c.issue_type, c.status, c.ai_priority || '', c.ai_sentiment || '', (c.custom_tags || []).join(';'), `"${(c.last_message || '').replace(/"/g, '""').substring(0, 200)}"`, `"${(c.ai_summary || '').replace(/"/g, '""')}"`]);
     const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
+    const a = document.createElement('a'); a.href = url;
     a.download = `gacha-conversations-${new Date().toISOString().split('T')[0]}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+    a.click(); URL.revokeObjectURL(url);
     toast.success(`Exported ${toExport.length} conversations`);
   };
 
-  // ─── Helpers ───────────────────────────────────────────────────────────────
+  // ─── Helpers ──────────────────────────────────────────────────────────────
 
   const formatTime = (iso: string) => {
     const d = new Date(iso), now = new Date();
@@ -442,16 +447,15 @@ export default function ConversationsPage() {
   };
 
   const issueLabel = (type: string) => type.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase());
-
   const urgentCount = conversations.filter(c => c.ai_priority === 'urgent').length;
   const unrepliedCount = conversations.filter(c => !c.replied && c.status === 'open').length;
 
-  // ─── Render ────────────────────────────────────────────────────────────────
+  // ─── Render ───────────────────────────────────────────────────────────────
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#f8fafc' }}>
 
-      {/* ── Tai AI Bar ── */}
+      {/* Tai bar */}
       <div style={{ background: 'linear-gradient(135deg, #1e1b4b 0%, #312e81 100%)', borderBottom: '1px solid #4338ca', padding: showTai ? '12px 20px' : '8px 20px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: showTai ? 10 : 0 }}>
           <div style={{ width: 32, height: 32, borderRadius: '50%', background: 'linear-gradient(135deg, #6366f1, #8b5cf6)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, fontWeight: 800, color: '#fff', flexShrink: 0 }}>T</div>
@@ -463,7 +467,6 @@ export default function ConversationsPage() {
             {showTai ? '▲ Hide' : '▼ Ask Tai'}
           </button>
         </div>
-
         {showTai && (
           <>
             {taiMessages.length > 0 && (
@@ -495,7 +498,7 @@ export default function ConversationsPage() {
             )}
             <div style={{ display: 'flex', gap: 8 }}>
               <input type="text" value={taiInput} onChange={e => setTaiInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') askTai(); }}
-                placeholder="Ask Tai... e.g. 'find users who paid for express shipping' or 'search wallet 0xe7475...'"
+                placeholder="Ask Tai... e.g. 'find users who paid for express shipping'"
                 style={{ flex: 1, padding: '10px 14px', background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(99,102,241,0.5)', borderRadius: 8, color: '#fff', fontSize: 13, outline: 'none' }} />
               <button onClick={askTai} disabled={taiLoading || !taiInput.trim()}
                 style={{ background: taiLoading ? '#4338ca' : '#6366f1', border: 'none', color: '#fff', borderRadius: 8, padding: '10px 18px', fontSize: 13, fontWeight: 600, cursor: taiLoading ? 'not-allowed' : 'pointer' }}>
@@ -506,7 +509,7 @@ export default function ConversationsPage() {
         )}
       </div>
 
-      {/* ── Top bar ── */}
+      {/* Top bar */}
       <div style={{ padding: '10px 20px', background: '#fff', borderBottom: '1px solid #e2e8f0', display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
         <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: '#1e293b' }}>Conversations</h1>
         {urgentCount > 0 && <span style={{ background: '#fef2f2', color: '#ef4444', border: '1px solid #fecaca', borderRadius: 20, padding: '2px 10px', fontSize: 12, fontWeight: 600 }}>🚨 {urgentCount} urgent</span>}
@@ -518,28 +521,18 @@ export default function ConversationsPage() {
         </div>
       </div>
 
-      {/* ── Filters ── */}
+      {/* Filters */}
       <div style={{ padding: '10px 20px', background: '#fff', borderBottom: '1px solid #e2e8f0', display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
         <div style={{ display: 'flex', flex: 1, minWidth: 280, gap: 0 }}>
-          <select value={searchMode} onChange={e => setSearchMode(e.target.value as any)}
-            style={{ ...selectStyle, borderRadius: '6px 0 0 6px', borderRight: 'none', width: 100 }}>
+          <select value={searchMode} onChange={e => setSearchMode(e.target.value as any)} style={{ ...selectStyle, borderRadius: '6px 0 0 6px', borderRight: 'none', width: 100 }}>
             <option value="keyword">🔍 Text</option>
             <option value="ai">🤖 AI</option>
           </select>
-          <input type="text" value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter' && searchMode === 'ai') handleAiSearch(); }}
+          <input type="text" value={searchQuery} onChange={e => setSearchQuery(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && searchMode === 'ai') handleAiSearch(); }}
             placeholder={searchMode === 'ai' ? 'AI semantic search...' : 'Name, email, wallet, location, message...'}
             style={{ flex: 1, padding: '6px 12px', border: '1px solid #d1d5db', borderRadius: 0, fontSize: 13, outline: 'none' }} />
-          {searchMode === 'ai' && (
-            <button onClick={handleAiSearch} disabled={aiSearching}
-              style={{ ...btnStyle('#6366f1'), borderRadius: '0 6px 6px 0', padding: '0 14px' }}>
-              {aiSearching ? '...' : 'Search'}
-            </button>
-          )}
-          {(searchQuery || issueFilter || statusFilter || priorityFilter) && (
-            <button onClick={() => { setSearchQuery(''); setIssueFilter(''); setStatusFilter(''); setPriorityFilter(''); }}
-              style={{ ...btnStyle('#94a3b8'), borderRadius: '0 6px 6px 0', padding: '0 10px' }}>✕</button>
-          )}
+          {searchMode === 'ai' && <button onClick={handleAiSearch} disabled={aiSearching} style={{ ...btnStyle('#6366f1'), borderRadius: '0 6px 6px 0', padding: '0 14px' }}>{aiSearching ? '...' : 'Search'}</button>}
+          {(searchQuery || issueFilter || statusFilter || priorityFilter) && <button onClick={() => { setSearchQuery(''); setIssueFilter(''); setStatusFilter(''); setPriorityFilter(''); }} style={{ ...btnStyle('#94a3b8'), borderRadius: '0 6px 6px 0', padding: '0 10px' }}>✕</button>}
         </div>
         <select value={issueFilter} onChange={e => setIssueFilter(e.target.value)} style={selectStyle}>
           <option value="">All Issues</option>
@@ -558,16 +551,13 @@ export default function ConversationsPage() {
           <option value="medium">🟡 Medium</option>
           <option value="low">🟢 Low</option>
         </select>
-        <span style={{ fontSize: 12, color: '#64748b', whiteSpace: 'nowrap' }}>
-          {filtered.length} / {conversations.length}
-          {selectedIds.size > 0 && ` · ${selectedIds.size} selected`}
-        </span>
+        <span style={{ fontSize: 12, color: '#64748b', whiteSpace: 'nowrap' }}>{filtered.length} / {conversations.length}{selectedIds.size > 0 && ` · ${selectedIds.size} selected`}</span>
       </div>
 
-      {/* ── Main content ── */}
+      {/* Main */}
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
 
-        {/* ── List ── */}
+        {/* List */}
         <div style={{ width: selected ? '35%' : '100%', borderRight: '1px solid #e2e8f0', overflowY: 'auto', background: '#fff', transition: 'width 0.2s' }}>
           {loading ? (
             <div style={{ padding: 40, textAlign: 'center', color: '#94a3b8' }}>Loading conversations...</div>
@@ -587,8 +577,7 @@ export default function ConversationsPage() {
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6 }}>
                         <span style={{ fontWeight: conv.unread ? 700 : 500, fontSize: 13, color: '#1e293b', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {conv.user_name}
-                          {conv.ai_sentiment && <span style={{ marginLeft: 4 }}>{SENTIMENT_EMOJI[conv.ai_sentiment]}</span>}
+                          {conv.user_name}{conv.ai_sentiment && <span style={{ marginLeft: 4 }}>{SENTIMENT_EMOJI[conv.ai_sentiment]}</span>}
                         </span>
                         <span style={{ fontSize: 11, color: '#94a3b8', whiteSpace: 'nowrap' }}>{formatTime(conv.updated_at)}</span>
                       </div>
@@ -609,13 +598,12 @@ export default function ConversationsPage() {
           )}
         </div>
 
-        {/* ── Detail panel ── */}
+        {/* Detail */}
         {selected && (
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
 
-            {/* Detail header */}
+            {/* Header */}
             <div style={{ padding: '12px 16px', background: '#fff', borderBottom: '1px solid #e2e8f0' }}>
-              {/* Name + actions row */}
               <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
                 <div style={{ fontWeight: 700, fontSize: 15, color: '#1e293b' }}>{selected.user_name}</div>
                 <span style={{ background: ISSUE_COLORS[selected.issue_type] + '20', color: ISSUE_COLORS[selected.issue_type], borderRadius: 6, padding: '3px 10px', fontSize: 12, fontWeight: 600 }}>{issueLabel(selected.issue_type)}</span>
@@ -627,34 +615,32 @@ export default function ConversationsPage() {
                 <button onClick={() => analyzeConversation(selected)} disabled={analyzingId === selected.id} style={btnStyle('#6366f1')}>
                   {analyzingId === selected.id ? '⏳ Analyzing...' : '🤖 AI Analyze'}
                 </button>
+                {/* Summary button */}
+                <button onClick={summarizeConversation} disabled={summarizing}
+                  style={{ ...btnStyle('#8b5cf6'), opacity: summarizing ? 0.6 : 1 }}>
+                  {summarizing ? '⏳ Summarizing...' : '📋 Summary'}
+                </button>
                 <button onClick={() => setSelected(null)} style={{ ...btnStyle('#94a3b8'), marginLeft: 'auto' }}>✕</button>
               </div>
 
-              {/* ── Copyable user data chips ── */}
+              {/* Copy chips */}
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
-                {selected.user_email && selected.user_email !== 'Unknown' && (
-                  <CopyChip label="Email" value={selected.user_email} />
-                )}
-                {selected.user_id && selected.user_id !== '' && (
-                  <CopyChip label="Wallet" value={selected.user_id} color="#7c3aed" />
-                )}
-                {selected.user_location && selected.user_location !== 'Unknown' && (
-                  <CopyChip label="Location" value={selected.user_location} color="#0369a1" />
-                )}
+                {selected.user_email && selected.user_email !== 'Unknown' && <CopyChip label="Email" value={selected.user_email} />}
+                {selected.user_id && <CopyChip label="Wallet" value={selected.user_id} color="#7c3aed" />}
+                {selected.user_location && selected.user_location !== 'Unknown' && <CopyChip label="Location" value={selected.user_location} color="#0369a1" />}
                 <CopyChip label="Conv ID" value={selected.id} color="#64748b" />
               </div>
 
-              {/* ── Custom tags ── */}
+              {/* Custom tags */}
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
                 {(selected.custom_tags || []).map(tag => (
                   <span key={tag} style={{ background: '#fef3c7', color: '#92400e', border: '1px solid #fde68a', borderRadius: 20, padding: '2px 10px', fontSize: 12, display: 'flex', alignItems: 'center', gap: 4 }}>
                     #{tag}
-                    <button onClick={() => removeTag(tag)} style={{ background: 'none', border: 'none', color: '#b45309', cursor: 'pointer', padding: 0, fontSize: 12, lineHeight: 1 }}>×</button>
+                    <button onClick={() => removeTag(tag)} style={{ background: 'none', border: 'none', color: '#b45309', cursor: 'pointer', padding: 0, fontSize: 12 }}>×</button>
                   </span>
                 ))}
                 <div style={{ display: 'flex', gap: 4 }}>
-                  <input type="text" value={newTag} onChange={e => setNewTag(e.target.value)}
-                    onKeyDown={e => { if (e.key === 'Enter') addTag(newTag); }}
+                  <input type="text" value={newTag} onChange={e => setNewTag(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') addTag(newTag); }}
                     placeholder="+ add tag"
                     style={{ padding: '2px 8px', border: '1px dashed #d1d5db', borderRadius: 20, fontSize: 12, outline: 'none', width: 80, color: '#64748b' }} />
                   {newTag && <button onClick={() => addTag(newTag)} style={{ ...btnStyle('#f59e0b'), padding: '2px 8px', fontSize: 11 }}>Add</button>}
@@ -662,22 +648,84 @@ export default function ConversationsPage() {
               </div>
             </div>
 
-            {/* AI summary */}
+            {/* AI summary bar */}
             {selected.ai_summary && (
               <div style={{ padding: '10px 16px', background: '#f0f4ff', borderBottom: '1px solid #e2e8f0', fontSize: 13 }}>
-                <span style={{ fontWeight: 600, color: '#4338ca' }}>🤖 Summary: </span>
+                <span style={{ fontWeight: 600, color: '#4338ca' }}>🤖 AI: </span>
                 <span style={{ color: '#1e293b' }}>{selected.ai_summary}</span>
-                {selected.ai_priority && (
-                  <span style={{ marginLeft: 10, background: PRIORITY_COLORS[selected.ai_priority] + '20', color: PRIORITY_COLORS[selected.ai_priority], borderRadius: 4, padding: '1px 8px', fontSize: 11, fontWeight: 600 }}>{selected.ai_priority} priority</span>
-                )}
+                {selected.ai_priority && <span style={{ marginLeft: 10, background: PRIORITY_COLORS[selected.ai_priority] + '20', color: PRIORITY_COLORS[selected.ai_priority], borderRadius: 4, padding: '1px 8px', fontSize: 11, fontWeight: 600 }}>{selected.ai_priority} priority</span>}
               </div>
             )}
 
-            {/* Thread loading indicator */}
+            {/* ── Summary panel ── */}
+            {showSummaryPanel && (
+              <div style={{ padding: '12px 16px', background: '#faf5ff', borderBottom: '1px solid #e9d5ff' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <span style={{ fontWeight: 700, color: '#7c3aed', fontSize: 13 }}>📋 Conversation Summary</span>
+                  <button onClick={() => setShowSummaryPanel(false)} style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', fontSize: 14 }}>✕</button>
+                </div>
+                {summarizing ? (
+                  <div style={{ color: '#94a3b8', fontSize: 13 }}>Generating summary...</div>
+                ) : selected.conv_summary ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <div style={{ fontSize: 13, color: '#1e293b', lineHeight: 1.5 }}>{selected.conv_summary.summary}</div>
+                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                      <span style={{ background: (STATUS_COLOR[selected.conv_summary.current_status] || '#6b7280') + '20', color: STATUS_COLOR[selected.conv_summary.current_status] || '#6b7280', borderRadius: 6, padding: '2px 10px', fontSize: 11, fontWeight: 600 }}>
+                        {selected.conv_summary.current_status.replace('_', ' ')}
+                      </span>
+                      <span style={{ background: PRIORITY_COLORS[selected.conv_summary.urgency as keyof typeof PRIORITY_COLORS]?.concat('20') || '#f1f5f9', color: PRIORITY_COLORS[selected.conv_summary.urgency as keyof typeof PRIORITY_COLORS] || '#64748b', borderRadius: 6, padding: '2px 10px', fontSize: 11, fontWeight: 600 }}>
+                        {selected.conv_summary.urgency} urgency
+                      </span>
+                    </div>
+                    {selected.conv_summary.next_steps.length > 0 && (
+                      <div>
+                        <div style={{ fontSize: 11, fontWeight: 600, color: '#64748b', marginBottom: 4 }}>NEXT STEPS</div>
+                        {selected.conv_summary.next_steps.map((step, i) => (
+                          <div key={i} style={{ fontSize: 12, color: '#374151', padding: '2px 0', display: 'flex', gap: 6 }}>
+                            <span style={{ color: '#8b5cf6', fontWeight: 600 }}>{i + 1}.</span> {step}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {selected.conv_summary.suggested_reply && (
+                      <div style={{ background: '#f0fdf4', border: '1px solid #bbf7d0', borderRadius: 6, padding: 8 }}>
+                        <div style={{ fontSize: 11, fontWeight: 600, color: '#166534', marginBottom: 4 }}>💡 SUGGESTED REPLY</div>
+                        <div style={{ fontSize: 12, color: '#166534' }}>{selected.conv_summary.suggested_reply}</div>
+                        <button onClick={() => setReplyText(selected.conv_summary!.suggested_reply)} style={{ ...btnStyle('#16a34a'), fontSize: 11, marginTop: 6, padding: '3px 10px' }}>Use this reply</button>
+                      </div>
+                    )}
+                  </div>
+                ) : null}
+              </div>
+            )}
+
+            {/* ── Translate panel ── */}
+            {showTranslatePanel && (
+              <div style={{ padding: '12px 16px', background: '#f0f9ff', borderBottom: '1px solid #bae6fd' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                  <span style={{ fontWeight: 700, color: '#0369a1', fontSize: 13 }}>
+                    🌐 {translateSource === 'message' ? `Translating user message → English` : `Translating your reply → ${translateTarget}`}
+                    {translatedFrom && ` (detected: ${translatedFrom})`}
+                  </span>
+                  <button onClick={() => { setShowTranslatePanel(false); setTranslatedText(''); }} style={{ background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer', fontSize: 14 }}>✕</button>
+                </div>
+                {translating ? (
+                  <div style={{ color: '#94a3b8', fontSize: 13 }}>Translating...</div>
+                ) : translatedText ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    <div style={{ fontSize: 13, color: '#0c4a6e', background: '#fff', border: '1px solid #bae6fd', borderRadius: 6, padding: 10, lineHeight: 1.5 }}>{translatedText}</div>
+                    {translateSource === 'reply' && (
+                      <button onClick={() => setReplyText(translatedText)} style={{ ...btnStyle('#0369a1'), alignSelf: 'flex-start', fontSize: 11 }}>Use translated version</button>
+                    )}
+                  </div>
+                ) : null}
+              </div>
+            )}
+
+            {/* Loading thread */}
             {loadingThread && (
-              <div style={{ padding: '8px 16px', background: '#f8fafc', borderBottom: '1px solid #e2e8f0', fontSize: 12, color: '#94a3b8', display: 'flex', alignItems: 'center', gap: 6 }}>
-                <span style={{ animation: 'spin 1s linear infinite', display: 'inline-block' }}>⏳</span>
-                Loading full conversation thread...
+              <div style={{ padding: '8px 16px', background: '#f8fafc', borderBottom: '1px solid #e2e8f0', fontSize: 12, color: '#94a3b8' }}>
+                ⏳ Loading full conversation thread...
               </div>
             )}
 
@@ -688,17 +736,15 @@ export default function ConversationsPage() {
                   <div key={i} style={{ display: 'flex', justifyContent: msg.author_type === 'admin' ? 'flex-end' : 'flex-start' }}>
                     <div style={{ maxWidth: '75%', background: msg.author_type === 'admin' ? '#6366f1' : '#fff', color: msg.author_type === 'admin' ? '#fff' : '#1e293b', borderRadius: msg.author_type === 'admin' ? '16px 16px 4px 16px' : '16px 16px 16px 4px', padding: '10px 14px', boxShadow: '0 1px 3px rgba(0,0,0,0.08)', border: msg.author_type === 'user' ? '1px solid #e2e8f0' : 'none' }}>
                       <div style={{ fontSize: 10, marginBottom: 4, opacity: 0.7 }}>
-                        {msg.author_type === 'admin' ? 'TyAi' : msg.author_name} · {formatTime(msg.created_at)}
+                        {msg.author_type === 'admin' ? 'Tai' : msg.author_name} · {formatTime(msg.created_at)}
                       </div>
-                      <div style={{ fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
-                        {msg.body.replace(/<[^>]*>/g, '')}
-                      </div>
+                      <div style={{ fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{msg.body.replace(/<[^>]*>/g, '')}</div>
                     </div>
                   </div>
                 ))
               ) : (
-                <div style={{ background: '#fff', borderRadius: 12, padding: 16, border: '1px solid #e2e8f0', fontSize: 13, color: '#1e293b', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
-                  {selected.last_message || 'No message content available'}
+                <div style={{ background: '#fff', borderRadius: 12, padding: 16, border: '1px solid #e2e8f0', fontSize: 13, color: '#1e293b', lineHeight: 1.5 }}>
+                  {selected.last_message || 'No message content'}
                 </div>
               )}
               <div ref={messagesEndRef} />
@@ -708,17 +754,35 @@ export default function ConversationsPage() {
             <div style={{ padding: '12px 16px', background: '#fff', borderTop: '1px solid #e2e8f0' }}>
               {selected.ai_suggested_reply && (
                 <div style={{ marginBottom: 8, padding: 10, background: '#f0fdf4', borderRadius: 6, border: '1px solid #bbf7d0', fontSize: 12, color: '#166534' }}>
-                  <span style={{ fontWeight: 600 }}>💡 TyAi Suggested: </span>
+                  <span style={{ fontWeight: 600 }}>💡 Tai Suggested: </span>
                   {selected.ai_suggested_reply}
                   <button onClick={() => setReplyText(selected.ai_suggested_reply || '')} style={{ marginLeft: 8, fontSize: 11, color: '#16a34a', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}>Use this</button>
                 </div>
               )}
+
+              {/* Translate target language selector */}
+              <div style={{ display: 'flex', gap: 6, marginBottom: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                <span style={{ fontSize: 11, color: '#94a3b8' }}>Translate to:</span>
+                <select value={translateTarget} onChange={e => setTranslateTarget(e.target.value)} style={{ ...selectStyle, padding: '3px 8px', fontSize: 11 }}>
+                  {['English', 'Spanish', 'French', 'German', 'Portuguese', 'Italian', 'Japanese', 'Korean', 'Chinese', 'Arabic', 'Thai', 'Vietnamese', 'Indonesian', 'Malay'].map(l => <option key={l}>{l}</option>)}
+                </select>
+                <button onClick={() => translate('reply')} disabled={translating || !replyText.trim()} style={{ ...btnStyle('#0369a1'), padding: '3px 10px', fontSize: 11, opacity: !replyText.trim() ? 0.4 : 1 }}>
+                  🌐 Translate my reply
+                </button>
+                <button onClick={() => translate('message')} disabled={translating} style={{ ...btnStyle('#0891b2'), padding: '3px 10px', fontSize: 11 }}>
+                  🌐 Translate their message
+                </button>
+              </div>
+
               <div style={{ display: 'flex', gap: 8 }}>
                 <textarea value={replyText} onChange={e => setReplyText(e.target.value)} placeholder="Type your reply..." rows={3}
                   style={{ flex: 1, padding: '8px 12px', border: '1px solid #d1d5db', borderRadius: 8, fontSize: 13, resize: 'vertical', outline: 'none', fontFamily: 'inherit' }} />
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                   <button onClick={sendReply} disabled={sendingReply || !replyText.trim()} style={{ ...btnStyle('#6366f1'), opacity: sendingReply || !replyText.trim() ? 0.5 : 1 }}>
                     {sendingReply ? 'Sending...' : 'Send Reply'}
+                  </button>
+                  <button onClick={polishReply} disabled={polishing || !replyText.trim()} style={{ ...btnStyle('#f59e0b'), opacity: polishing || !replyText.trim() ? 0.5 : 1 }}>
+                    {polishing ? '...' : '✨ Polish'}
                   </button>
                   <button onClick={() => setReplyText('')} style={btnStyle('#94a3b8')}>Clear</button>
                 </div>
