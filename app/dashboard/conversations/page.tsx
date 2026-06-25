@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
+import { useSearchParams } from 'next/navigation';
 import toast from 'react-hot-toast';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -27,6 +28,7 @@ interface Conversation {
   unread: boolean;
   replied: boolean;
   tags?: string[];
+  custom_tags?: string[];
   ai_summary?: string;
   ai_priority?: 'low' | 'medium' | 'high' | 'urgent';
   ai_priority_reason?: string;
@@ -68,17 +70,53 @@ const SENTIMENT_EMOJI: Record<string, string> = {
   angry: '😠',
 };
 
+// ─── Copy chip component ──────────────────────────────────────────────────────
+
+function CopyChip({ label, value, color }: { label: string; value: string; color?: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => {
+    navigator.clipboard.writeText(value).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    });
+  };
+  return (
+    <button
+      onClick={copy}
+      title={`Click to copy: ${value}`}
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: 4,
+        background: copied ? '#dcfce7' : '#f1f5f9',
+        border: `1px solid ${copied ? '#86efac' : '#e2e8f0'}`,
+        borderRadius: 6, padding: '3px 8px', fontSize: 11,
+        color: copied ? '#16a34a' : (color || '#475569'),
+        cursor: 'pointer', fontFamily: 'inherit',
+        transition: 'all 0.15s',
+      }}
+    >
+      <span style={{ fontWeight: 600, color: '#94a3b8', marginRight: 2 }}>{label}</span>
+      <span style={{ maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+        {copied ? '✓ Copied!' : value}
+      </span>
+    </button>
+  );
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function ConversationsPage() {
+  const searchParams = useSearchParams();
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [filtered, setFiltered] = useState<Conversation[]>([]);
   const [selected, setSelected] = useState<Conversation | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadingThread, setLoadingThread] = useState(false);
   const [analyzingId, setAnalyzingId] = useState<string | null>(null);
   const [aiSearching, setAiSearching] = useState(false);
   const [replyText, setReplyText] = useState('');
   const [sendingReply, setSendingReply] = useState(false);
+  const [newTag, setNewTag] = useState('');
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Filters
   const [issueFilter, setIssueFilter] = useState('');
@@ -88,14 +126,14 @@ export default function ConversationsPage() {
   const [searchMode, setSearchMode] = useState<'keyword' | 'ai'>('keyword');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 
-  // Tai AI Assistant
+  // Tai
   const [taiInput, setTaiInput] = useState('');
   const [taiMessages, setTaiMessages] = useState<TaiMessage[]>([]);
   const [taiLoading, setTaiLoading] = useState(false);
   const [showTai, setShowTai] = useState(true);
   const taiEndRef = useRef<HTMLDivElement>(null);
 
-  // ─── Data loading ──────────────────────────────────────────────────────────
+  // ─── Load conversations + handle analytics drill-down ─────────────────────
 
   const loadConversations = async () => {
     setLoading(true);
@@ -104,12 +142,19 @@ export default function ConversationsPage() {
       const data = await res.json();
       if (data.success) {
         setConversations(data.data);
-        setFiltered(data.data);
+        // Apply issue filter from analytics drill-down URL param
+        const issueParam = searchParams.get('issue');
+        if (issueParam) {
+          setIssueFilter(issueParam);
+          setFiltered(data.data.filter((c: Conversation) => c.issue_type === issueParam));
+        } else {
+          setFiltered(data.data);
+        }
         toast.success(`Loaded ${data.count} conversations`);
       } else {
         toast.error('Failed to load conversations');
       }
-    } catch (err) {
+    } catch {
       toast.error('Error loading conversations');
     } finally {
       setLoading(false);
@@ -117,6 +162,41 @@ export default function ConversationsPage() {
   };
 
   useEffect(() => { loadConversations(); }, []);
+
+  // ─── Lazy load full thread when conversation is selected ──────────────────
+
+  const selectConversation = async (conv: Conversation) => {
+    if (selected?.id === conv.id) {
+      setSelected(null);
+      return;
+    }
+    // Show immediately with whatever we have
+    setSelected(conv);
+    // If we already have full messages, skip fetch
+    if (conv.full_messages && conv.full_messages.length > 1) return;
+
+    setLoadingThread(true);
+    try {
+      const res = await fetch(`/api/intercom/fetch-single-conversation?id=${conv.id}`);
+      const data = await res.json();
+      if (data.success) {
+        const updated = { ...conv, ...data.data };
+        setSelected(updated);
+        setConversations(prev => prev.map(c => c.id === conv.id ? updated : c));
+      }
+    } catch {
+      // silently fail — we still show what we have
+    } finally {
+      setLoadingThread(false);
+    }
+  };
+
+  // Scroll to bottom of messages when thread loads
+  useEffect(() => {
+    if (selected?.full_messages) {
+      setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
+    }
+  }, [selected?.full_messages?.length]);
 
   // ─── Filtering ─────────────────────────────────────────────────────────────
 
@@ -132,9 +212,11 @@ export default function ConversationsPage() {
       result = result.filter(c =>
         c.user_name.toLowerCase().includes(q) ||
         c.user_email.toLowerCase().includes(q) ||
+        c.user_id.toLowerCase().includes(q) ||
+        c.user_location.toLowerCase().includes(q) ||
         c.last_message.toLowerCase().includes(q) ||
         c.issue_type.toLowerCase().includes(q) ||
-        c.user_location.toLowerCase().includes(q)
+        (c.custom_tags || []).some(t => t.toLowerCase().includes(q))
       );
     }
 
@@ -149,30 +231,40 @@ export default function ConversationsPage() {
     setFiltered(result);
   }, [conversations, issueFilter, statusFilter, priorityFilter, searchQuery, searchMode]);
 
+  // ─── Manual tags ───────────────────────────────────────────────────────────
+
+  const addTag = (tag: string) => {
+    if (!selected || !tag.trim()) return;
+    const trimmed = tag.trim().toLowerCase();
+    if ((selected.custom_tags || []).includes(trimmed)) return;
+    const updated = { ...selected, custom_tags: [...(selected.custom_tags || []), trimmed] };
+    setSelected(updated);
+    setConversations(prev => prev.map(c => c.id === selected.id ? updated : c));
+    setNewTag('');
+  };
+
+  const removeTag = (tag: string) => {
+    if (!selected) return;
+    const updated = { ...selected, custom_tags: (selected.custom_tags || []).filter(t => t !== tag) };
+    setSelected(updated);
+    setConversations(prev => prev.map(c => c.id === selected.id ? updated : c));
+  };
+
   // ─── Tai AI Assistant ──────────────────────────────────────────────────────
 
-  useEffect(() => {
-    taiEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [taiMessages]);
+  useEffect(() => { taiEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [taiMessages]);
 
   const askTai = async () => {
     if (!taiInput.trim() || taiLoading) return;
     const question = taiInput.trim();
     setTaiInput('');
-
-    const userMsg: TaiMessage = {
-      role: 'user',
-      text: question,
-      timestamp: new Date().toISOString(),
-    };
-    setTaiMessages(prev => [...prev, userMsg]);
+    setTaiMessages(prev => [...prev, { role: 'user', text: question, timestamp: new Date().toISOString() }]);
     setTaiLoading(true);
 
     try {
-      // Build conversation summaries for Tai to search through
       const searchData = conversations.map(c => ({
         id: c.id,
-        text: `User: ${c.user_name} | Email: ${c.user_email} | Issue: ${c.issue_type} | Message: ${c.last_message} | Status: ${c.status}`,
+        text: `User: ${c.user_name} | Email: ${c.user_email} | Wallet: ${c.user_id} | Location: ${c.user_location} | Issue: ${c.issue_type} | Message: ${c.last_message} | Status: ${c.status}`,
         user: c.user_name,
       }));
 
@@ -183,43 +275,30 @@ export default function ConversationsPage() {
       });
 
       const data = await res.json();
-
       if (data.success && data.results.length > 0) {
         const matchIds = new Set(data.results.map((r: any) => r.id));
         const matchedConvs = conversations.filter(c => matchIds.has(c.id));
-
-        // Build Tai's response text
-        const resultSummary = data.results
-          .slice(0, 5)
+        const summary = data.results.slice(0, 5)
           .map((r: any) => {
             const conv = conversations.find(c => c.id === r.id);
-            return conv ? `• **${conv.user_name}** (${conv.user_email}) — ${r.reason}` : null;
-          })
-          .filter(Boolean)
-          .join('\n');
+            return conv ? `• ${conv.user_name} (${conv.user_email}) — ${r.reason}` : null;
+          }).filter(Boolean).join('\n');
 
-        const taiReply: TaiMessage = {
+        setTaiMessages(prev => [...prev, {
           role: 'tai',
-          text: `I found **${data.results.length}** potential match${data.results.length !== 1 ? 'es' : ''} for "${question}":\n\n${resultSummary}`,
+          text: `Found ${data.results.length} match${data.results.length !== 1 ? 'es' : ''} for "${question}":\n\n${summary}`,
           matches: matchedConvs.slice(0, 5),
           timestamp: new Date().toISOString(),
-        };
-        setTaiMessages(prev => [...prev, taiReply]);
+        }]);
       } else {
-        const taiReply: TaiMessage = {
+        setTaiMessages(prev => [...prev, {
           role: 'tai',
-          text: `I couldn't find any conversations matching "${question}". Try rephrasing or using different keywords.`,
+          text: `No conversations found matching "${question}". Try different keywords.`,
           timestamp: new Date().toISOString(),
-        };
-        setTaiMessages(prev => [...prev, taiReply]);
+        }]);
       }
     } catch {
-      const taiReply: TaiMessage = {
-        role: 'tai',
-        text: 'Sorry, I ran into an error. Please try again.',
-        timestamp: new Date().toISOString(),
-      };
-      setTaiMessages(prev => [...prev, taiReply]);
+      setTaiMessages(prev => [...prev, { role: 'tai', text: 'Error — please try again.', timestamp: new Date().toISOString() }]);
     } finally {
       setTaiLoading(false);
     }
@@ -233,23 +312,21 @@ export default function ConversationsPage() {
     try {
       const searchData = conversations.map(c => ({
         id: c.id,
-        text: `${c.user_name} ${c.issue_type} ${c.last_message}`,
+        text: `${c.user_name} ${c.user_email} ${c.user_id} ${c.issue_type} ${c.last_message} ${c.user_location}`,
         user: c.user_name,
       }));
-
       const res = await fetch('/api/claude/search', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ query: searchQuery, conversations: searchData }),
       });
-
       const data = await res.json();
       if (data.success && data.results.length > 0) {
         const matchIds = new Set(data.results.map((r: any) => r.id));
         setFiltered(conversations.filter(c => matchIds.has(c.id)));
-        toast.success(`AI found ${data.results.length} relevant conversations`);
+        toast.success(`Found ${data.results.length} conversations`);
       } else {
-        toast('No matches found for that query', { icon: '🔍' });
+        toast('No matches found', { icon: '🔍' });
         setFiltered([]);
       }
     } catch {
@@ -273,46 +350,33 @@ export default function ConversationsPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ conversationText: text, userName: conv.user_name }),
       });
-
       const data = await res.json();
       if (data.success) {
         const updated = conversations.map(c =>
-          c.id === conv.id
-            ? {
-                ...c,
-                ai_summary: data.data.summary,
-                ai_priority: data.data.priority,
-                ai_priority_reason: data.data.priority_reason,
-                ai_sentiment: data.data.sentiment,
-                ai_suggested_reply: data.data.suggested_reply,
-                ai_action_needed: data.data.action_needed,
-                issue_type: data.data.issue_type || c.issue_type,
-              }
-            : c
+          c.id === conv.id ? {
+            ...c,
+            ai_summary: data.data.summary,
+            ai_priority: data.data.priority,
+            ai_priority_reason: data.data.priority_reason,
+            ai_sentiment: data.data.sentiment,
+            ai_suggested_reply: data.data.suggested_reply,
+            ai_action_needed: data.data.action_needed,
+            issue_type: data.data.issue_type || c.issue_type,
+          } : c
         );
         setConversations(updated);
-        if (selected?.id === conv.id) {
-          setSelected(updated.find(c => c.id === conv.id) || null);
-        }
-        toast.success('AI analysis complete');
+        if (selected?.id === conv.id) setSelected(updated.find(c => c.id === conv.id) || null);
+        toast.success('Analysis complete');
       }
-    } catch {
-      toast.error('AI analysis failed');
-    } finally {
-      setAnalyzingId(null);
-    }
+    } catch { toast.error('Analysis failed'); }
+    finally { setAnalyzingId(null); }
   };
 
   const analyzeAll = async () => {
     const toAnalyze = filtered.filter(c => !c.ai_summary).slice(0, 20);
-    if (toAnalyze.length === 0) {
-      toast('All visible conversations already analyzed');
-      return;
-    }
+    if (!toAnalyze.length) { toast('All already analyzed'); return; }
     toast(`Analyzing ${toAnalyze.length} conversations...`);
-    for (const conv of toAnalyze) {
-      await analyzeConversation(conv);
-    }
+    for (const conv of toAnalyze) await analyzeConversation(conv);
   };
 
   // ─── Reply ─────────────────────────────────────────────────────────────────
@@ -329,75 +393,33 @@ export default function ConversationsPage() {
       const data = await res.json();
       if (data.success) {
         toast.success('Reply sent!');
-
-        // ✅ FIX: Add the reply to the message thread immediately
-        const newMessage: MessagePart = {
-          author_type: 'admin',
-          author_name: 'TyAi',
-          body: replyText,
-          created_at: new Date().toISOString(),
-        };
-
-        const updatedSelected = {
-          ...selected,
-          replied: true,
-          full_messages: [...(selected.full_messages || []), newMessage],
-        };
-
+        const newMsg: MessagePart = { author_type: 'admin', author_name: 'TyAi', body: replyText, created_at: new Date().toISOString() };
+        const updatedSelected = { ...selected, replied: true, full_messages: [...(selected.full_messages || []), newMsg] };
         setSelected(updatedSelected);
-        setConversations(prev =>
-          prev.map(c => c.id === selected.id ? updatedSelected : c)
-        );
+        setConversations(prev => prev.map(c => c.id === selected.id ? updatedSelected : c));
         setReplyText('');
       } else {
         toast.error('Failed to send reply');
       }
-    } catch {
-      toast.error('Error sending reply');
-    } finally {
-      setSendingReply(false);
-    }
+    } catch { toast.error('Error sending reply'); }
+    finally { setSendingReply(false); }
   };
 
   // ─── Bulk actions ──────────────────────────────────────────────────────────
 
-  const toggleSelect = (id: string) => {
-    setSelectedIds(prev => {
-      const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
-      return next;
-    });
-  };
-
-  const selectAll = () => {
-    setSelectedIds(prev =>
-      prev.size === filtered.length
-        ? new Set()
-        : new Set(filtered.map(c => c.id))
-    );
-  };
+  const toggleSelect = (id: string) => setSelectedIds(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const selectAll = () => setSelectedIds(prev => prev.size === filtered.length ? new Set() : new Set(filtered.map(c => c.id)));
 
   const exportCSV = () => {
-    const toExport = selectedIds.size > 0
-      ? filtered.filter(c => selectedIds.has(c.id))
-      : filtered;
-
-    const headers = ['ID', 'User', 'Email', 'Location', 'Issue Type', 'Status', 'Priority', 'Sentiment', 'Last Message', 'AI Summary', 'Created', 'Updated'];
+    const toExport = selectedIds.size > 0 ? filtered.filter(c => selectedIds.has(c.id)) : filtered;
+    const headers = ['ID', 'User', 'Email', 'Wallet', 'Location', 'Issue Type', 'Status', 'Priority', 'Sentiment', 'Tags', 'Last Message', 'AI Summary'];
     const rows = toExport.map(c => [
-      c.id,
-      c.user_name,
-      c.user_email,
-      c.user_location,
-      c.issue_type,
-      c.status,
-      c.ai_priority || '',
-      c.ai_sentiment || '',
+      c.id, c.user_name, c.user_email, c.user_id, c.user_location,
+      c.issue_type, c.status, c.ai_priority || '', c.ai_sentiment || '',
+      (c.custom_tags || []).join(';'),
       `"${(c.last_message || '').replace(/"/g, '""').substring(0, 200)}"`,
       `"${(c.ai_summary || '').replace(/"/g, '""')}"`,
-      c.created_at,
-      c.updated_at,
     ]);
-
     const csv = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
@@ -412,106 +434,54 @@ export default function ConversationsPage() {
   // ─── Helpers ───────────────────────────────────────────────────────────────
 
   const formatTime = (iso: string) => {
-    const d = new Date(iso);
-    const now = new Date();
+    const d = new Date(iso), now = new Date();
     const diffH = (now.getTime() - d.getTime()) / 3600000;
     if (diffH < 1) return `${Math.round(diffH * 60)}m ago`;
     if (diffH < 24) return `${Math.round(diffH)}h ago`;
     return d.toLocaleDateString();
   };
 
-  const issueLabel = (type: string) =>
-    type.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase());
-
-  // ─── Render ────────────────────────────────────────────────────────────────
+  const issueLabel = (type: string) => type.replace('_', ' ').replace(/\b\w/g, l => l.toUpperCase());
 
   const urgentCount = conversations.filter(c => c.ai_priority === 'urgent').length;
   const unrepliedCount = conversations.filter(c => !c.replied && c.status === 'open').length;
 
+  // ─── Render ────────────────────────────────────────────────────────────────
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#f8fafc' }}>
 
-      {/* ── Tai AI Assistant Bar ── */}
-      <div style={{
-        background: 'linear-gradient(135deg, #1e1b4b 0%, #312e81 100%)',
-        borderBottom: '1px solid #4338ca',
-        padding: showTai ? '12px 20px' : '8px 20px',
-      }}>
-        {/* Header row */}
+      {/* ── Tai AI Bar ── */}
+      <div style={{ background: 'linear-gradient(135deg, #1e1b4b 0%, #312e81 100%)', borderBottom: '1px solid #4338ca', padding: showTai ? '12px 20px' : '8px 20px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: showTai ? 10 : 0 }}>
-          <div style={{
-            width: 32, height: 32, borderRadius: '50%',
-            background: 'linear-gradient(135deg, #6366f1, #8b5cf6)',
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: 14, fontWeight: 800, color: '#fff', flexShrink: 0,
-          }}>T</div>
+          <div style={{ width: 32, height: 32, borderRadius: '50%', background: 'linear-gradient(135deg, #6366f1, #8b5cf6)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 14, fontWeight: 800, color: '#fff', flexShrink: 0 }}>T</div>
           <div>
             <div style={{ color: '#fff', fontWeight: 700, fontSize: 14 }}>Tai</div>
-            <div style={{ color: '#a5b4fc', fontSize: 11 }}>AI Support Assistant</div>
+            <div style={{ color: '#a5b4fc', fontSize: 11 }}>AI Support Assistant · search by name, email, wallet, location, or any issue</div>
           </div>
-          <button
-            onClick={() => setShowTai(!showTai)}
-            style={{ marginLeft: 'auto', background: 'rgba(255,255,255,0.1)', border: 'none', color: '#a5b4fc', borderRadius: 6, padding: '4px 10px', cursor: 'pointer', fontSize: 12 }}
-          >
+          <button onClick={() => setShowTai(!showTai)} style={{ marginLeft: 'auto', background: 'rgba(255,255,255,0.1)', border: 'none', color: '#a5b4fc', borderRadius: 6, padding: '4px 10px', cursor: 'pointer', fontSize: 12 }}>
             {showTai ? '▲ Hide' : '▼ Ask Tai'}
           </button>
         </div>
 
         {showTai && (
           <>
-            {/* Chat history */}
             {taiMessages.length > 0 && (
-              <div style={{
-                maxHeight: 200, overflowY: 'auto', marginBottom: 10,
-                background: 'rgba(0,0,0,0.2)', borderRadius: 8, padding: '8px 12px',
-                display: 'flex', flexDirection: 'column', gap: 8,
-              }}>
+              <div style={{ maxHeight: 200, overflowY: 'auto', marginBottom: 10, background: 'rgba(0,0,0,0.2)', borderRadius: 8, padding: '8px 12px', display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {taiMessages.map((msg, i) => (
                   <div key={i}>
-                    <div style={{
-                      display: 'flex', gap: 8,
-                      justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
-                    }}>
-                      <div style={{
-                        maxWidth: '80%',
-                        background: msg.role === 'user' ? '#6366f1' : 'rgba(255,255,255,0.1)',
-                        color: '#fff',
-                        borderRadius: msg.role === 'user' ? '12px 12px 4px 12px' : '12px 12px 12px 4px',
-                        padding: '8px 12px',
-                        fontSize: 13,
-                        lineHeight: 1.5,
-                        whiteSpace: 'pre-line',
-                      }}>
+                    <div style={{ display: 'flex', gap: 8, justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start' }}>
+                      <div style={{ maxWidth: '80%', background: msg.role === 'user' ? '#6366f1' : 'rgba(255,255,255,0.1)', color: '#fff', borderRadius: msg.role === 'user' ? '12px 12px 4px 12px' : '12px 12px 12px 4px', padding: '8px 12px', fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-line' }}>
                         {msg.role === 'tai' && <span style={{ fontWeight: 700, color: '#a5b4fc' }}>Tai: </span>}
                         {msg.text}
                       </div>
                     </div>
-                    {/* Match results as clickable chips */}
                     {msg.matches && msg.matches.length > 0 && (
                       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 6, paddingLeft: 8 }}>
                         {msg.matches.map(conv => (
-                          <button
-                            key={conv.id}
-                            onClick={() => {
-                              setSelected(conv);
-                              setShowTai(false);
-                            }}
-                            style={{
-                              background: 'rgba(99,102,241,0.3)',
-                              border: '1px solid #6366f1',
-                              color: '#c7d2fe',
-                              borderRadius: 20,
-                              padding: '4px 12px',
-                              fontSize: 12,
-                              cursor: 'pointer',
-                              display: 'flex', alignItems: 'center', gap: 6,
-                            }}
-                          >
-                            <span style={{
-                              width: 8, height: 8, borderRadius: '50%',
-                              background: ISSUE_COLORS[conv.issue_type] || '#6b7280',
-                              flexShrink: 0,
-                            }} />
+                          <button key={conv.id} onClick={() => { selectConversation(conv); setShowTai(false); }}
+                            style={{ background: 'rgba(99,102,241,0.3)', border: '1px solid #6366f1', color: '#c7d2fe', borderRadius: 20, padding: '4px 12px', fontSize: 12, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 }}>
+                            <span style={{ width: 8, height: 8, borderRadius: '50%', background: ISSUE_COLORS[conv.issue_type] || '#6b7280', flexShrink: 0 }} />
                             {conv.user_name} ↗
                           </button>
                         ))}
@@ -519,40 +489,16 @@ export default function ConversationsPage() {
                     )}
                   </div>
                 ))}
-                {taiLoading && (
-                  <div style={{ color: '#a5b4fc', fontSize: 13, fontStyle: 'italic' }}>
-                    Tai is thinking...
-                  </div>
-                )}
+                {taiLoading && <div style={{ color: '#a5b4fc', fontSize: 13, fontStyle: 'italic' }}>Tai is thinking...</div>}
                 <div ref={taiEndRef} />
               </div>
             )}
-
-            {/* Input */}
             <div style={{ display: 'flex', gap: 8 }}>
-              <input
-                type="text"
-                value={taiInput}
-                onChange={e => setTaiInput(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter') askTai(); }}
-                placeholder="Ask Tai... e.g. 'find users who paid for express shipping'"
-                style={{
-                  flex: 1, padding: '10px 14px',
-                  background: 'rgba(255,255,255,0.1)',
-                  border: '1px solid rgba(99,102,241,0.5)',
-                  borderRadius: 8, color: '#fff', fontSize: 13, outline: 'none',
-                }}
-              />
-              <button
-                onClick={askTai}
-                disabled={taiLoading || !taiInput.trim()}
-                style={{
-                  background: taiLoading ? '#4338ca' : '#6366f1',
-                  border: 'none', color: '#fff', borderRadius: 8,
-                  padding: '10px 18px', fontSize: 13, fontWeight: 600,
-                  cursor: taiLoading ? 'not-allowed' : 'pointer',
-                }}
-              >
+              <input type="text" value={taiInput} onChange={e => setTaiInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') askTai(); }}
+                placeholder="Ask Tai... e.g. 'find users who paid for express shipping' or 'search wallet 0xe7475...'"
+                style={{ flex: 1, padding: '10px 14px', background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(99,102,241,0.5)', borderRadius: 8, color: '#fff', fontSize: 13, outline: 'none' }} />
+              <button onClick={askTai} disabled={taiLoading || !taiInput.trim()}
+                style={{ background: taiLoading ? '#4338ca' : '#6366f1', border: 'none', color: '#fff', borderRadius: 8, padding: '10px 18px', fontSize: 13, fontWeight: 600, cursor: taiLoading ? 'not-allowed' : 'pointer' }}>
                 {taiLoading ? '...' : 'Ask Tai'}
               </button>
             </div>
@@ -561,103 +507,50 @@ export default function ConversationsPage() {
       </div>
 
       {/* ── Top bar ── */}
-      <div style={{
-        padding: '10px 20px',
-        background: '#fff',
-        borderBottom: '1px solid #e2e8f0',
-        display: 'flex',
-        gap: 12,
-        alignItems: 'center',
-        flexWrap: 'wrap',
-      }}>
-        <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: '#1e293b' }}>
-          Conversations
-        </h1>
-
-        {urgentCount > 0 && (
-          <span style={{
-            background: '#fef2f2', color: '#ef4444', border: '1px solid #fecaca',
-            borderRadius: 20, padding: '2px 10px', fontSize: 12, fontWeight: 600,
-          }}>
-            🚨 {urgentCount} urgent
-          </span>
-        )}
-        {unrepliedCount > 0 && (
-          <span style={{
-            background: '#fef9c3', color: '#854d0e', border: '1px solid #fde047',
-            borderRadius: 20, padding: '2px 10px', fontSize: 12, fontWeight: 600,
-          }}>
-            💬 {unrepliedCount} unreplied
-          </span>
-        )}
-
+      <div style={{ padding: '10px 20px', background: '#fff', borderBottom: '1px solid #e2e8f0', display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+        <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: '#1e293b' }}>Conversations</h1>
+        {urgentCount > 0 && <span style={{ background: '#fef2f2', color: '#ef4444', border: '1px solid #fecaca', borderRadius: 20, padding: '2px 10px', fontSize: 12, fontWeight: 600 }}>🚨 {urgentCount} urgent</span>}
+        {unrepliedCount > 0 && <span style={{ background: '#fef9c3', color: '#854d0e', border: '1px solid #fde047', borderRadius: 20, padding: '2px 10px', fontSize: 12, fontWeight: 600 }}>💬 {unrepliedCount} unreplied</span>}
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <button onClick={analyzeAll} style={btnStyle('#6366f1')}>
-            🤖 AI Analyze All
-          </button>
-          <button onClick={exportCSV} style={btnStyle('#10b981')}>
-            📊 Export CSV
-          </button>
-          <button onClick={loadConversations} style={btnStyle('#64748b')}>
-            🔄 Refresh
-          </button>
+          <button onClick={analyzeAll} style={btnStyle('#6366f1')}>🤖 AI Analyze All</button>
+          <button onClick={exportCSV} style={btnStyle('#10b981')}>📊 Export CSV</button>
+          <button onClick={loadConversations} style={btnStyle('#64748b')}>🔄 Refresh</button>
         </div>
       </div>
 
-      {/* ── Filters + Search ── */}
-      <div style={{
-        padding: '10px 20px',
-        background: '#fff',
-        borderBottom: '1px solid #e2e8f0',
-        display: 'flex',
-        gap: 10,
-        alignItems: 'center',
-        flexWrap: 'wrap',
-      }}>
-        <div style={{ display: 'flex', flex: 1, minWidth: 250, gap: 0 }}>
-          <select
-            value={searchMode}
-            onChange={e => setSearchMode(e.target.value as any)}
-            style={{ ...selectStyle, borderRadius: '6px 0 0 6px', borderRight: 'none', width: 100 }}
-          >
+      {/* ── Filters ── */}
+      <div style={{ padding: '10px 20px', background: '#fff', borderBottom: '1px solid #e2e8f0', display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', flex: 1, minWidth: 280, gap: 0 }}>
+          <select value={searchMode} onChange={e => setSearchMode(e.target.value as any)}
+            style={{ ...selectStyle, borderRadius: '6px 0 0 6px', borderRight: 'none', width: 100 }}>
             <option value="keyword">🔍 Text</option>
             <option value="ai">🤖 AI</option>
           </select>
-          <input
-            type="text"
-            placeholder={searchMode === 'ai' ? 'e.g. "users who mentioned express shipping"' : 'Search by name, email, message...'}
-            value={searchQuery}
-            onChange={e => setSearchQuery(e.target.value)}
+          <input type="text" value={searchQuery} onChange={e => setSearchQuery(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter' && searchMode === 'ai') handleAiSearch(); }}
-            style={{ flex: 1, padding: '6px 12px', border: '1px solid #d1d5db', borderRadius: 0, fontSize: 13, outline: 'none' }}
-          />
+            placeholder={searchMode === 'ai' ? 'AI semantic search...' : 'Name, email, wallet, location, message...'}
+            style={{ flex: 1, padding: '6px 12px', border: '1px solid #d1d5db', borderRadius: 0, fontSize: 13, outline: 'none' }} />
           {searchMode === 'ai' && (
-            <button onClick={handleAiSearch} disabled={aiSearching} style={{ ...btnStyle('#6366f1'), borderRadius: '0 6px 6px 0', padding: '0 14px' }}>
+            <button onClick={handleAiSearch} disabled={aiSearching}
+              style={{ ...btnStyle('#6366f1'), borderRadius: '0 6px 6px 0', padding: '0 14px' }}>
               {aiSearching ? '...' : 'Search'}
             </button>
           )}
           {(searchQuery || issueFilter || statusFilter || priorityFilter) && (
-            <button
-              onClick={() => { setSearchQuery(''); setIssueFilter(''); setStatusFilter(''); setPriorityFilter(''); }}
-              style={{ ...btnStyle('#94a3b8'), borderRadius: '0 6px 6px 0', padding: '0 10px' }}
-            >✕</button>
+            <button onClick={() => { setSearchQuery(''); setIssueFilter(''); setStatusFilter(''); setPriorityFilter(''); }}
+              style={{ ...btnStyle('#94a3b8'), borderRadius: '0 6px 6px 0', padding: '0 10px' }}>✕</button>
           )}
         </div>
-
         <select value={issueFilter} onChange={e => setIssueFilter(e.target.value)} style={selectStyle}>
           <option value="">All Issues</option>
-          {Object.keys(ISSUE_COLORS).map(k => (
-            <option key={k} value={k}>{issueLabel(k)}</option>
-          ))}
+          {Object.keys(ISSUE_COLORS).map(k => <option key={k} value={k}>{issueLabel(k)}</option>)}
         </select>
-
         <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)} style={selectStyle}>
           <option value="">All Status</option>
           <option value="open">Open</option>
           <option value="closed">Closed</option>
           <option value="snoozed">Snoozed</option>
         </select>
-
         <select value={priorityFilter} onChange={e => setPriorityFilter(e.target.value)} style={selectStyle}>
           <option value="">All Priority</option>
           <option value="urgent">🚨 Urgent</option>
@@ -665,7 +558,6 @@ export default function ConversationsPage() {
           <option value="medium">🟡 Medium</option>
           <option value="low">🟢 Low</option>
         </select>
-
         <span style={{ fontSize: 12, color: '#64748b', whiteSpace: 'nowrap' }}>
           {filtered.length} / {conversations.length}
           {selectedIds.size > 0 && ` · ${selectedIds.size} selected`}
@@ -675,79 +567,36 @@ export default function ConversationsPage() {
       {/* ── Main content ── */}
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
 
-        {/* ── Conversation list ── */}
-        <div style={{
-          width: selected ? '35%' : '100%',
-          borderRight: '1px solid #e2e8f0',
-          overflowY: 'auto',
-          background: '#fff',
-          transition: 'width 0.2s',
-        }}>
+        {/* ── List ── */}
+        <div style={{ width: selected ? '35%' : '100%', borderRight: '1px solid #e2e8f0', overflowY: 'auto', background: '#fff', transition: 'width 0.2s' }}>
           {loading ? (
-            <div style={{ padding: 40, textAlign: 'center', color: '#94a3b8' }}>
-              Loading conversations...
-            </div>
+            <div style={{ padding: 40, textAlign: 'center', color: '#94a3b8' }}>Loading conversations...</div>
           ) : filtered.length === 0 ? (
-            <div style={{ padding: 40, textAlign: 'center', color: '#94a3b8' }}>
-              No conversations found
-            </div>
+            <div style={{ padding: 40, textAlign: 'center', color: '#94a3b8' }}>No conversations found</div>
           ) : (
             <>
-              {/* Select all */}
               <div style={{ padding: '8px 16px', borderBottom: '1px solid #f1f5f9', display: 'flex', alignItems: 'center', gap: 8 }}>
                 <input type="checkbox" checked={selectedIds.size === filtered.length && filtered.length > 0} onChange={selectAll} />
                 <span style={{ fontSize: 12, color: '#64748b' }}>Select all ({filtered.length})</span>
               </div>
-
               {filtered.map(conv => (
-                <div
-                  key={conv.id}
-                  onClick={() => setSelected(selected?.id === conv.id ? null : conv)}
-                  style={{
-                    padding: '12px 16px',
-                    borderBottom: '1px solid #f1f5f9',
-                    cursor: 'pointer',
-                    background: selected?.id === conv.id ? '#f0f4ff' : conv.unread ? '#fefce8' : '#fff',
-                    borderLeft: `4px solid ${conv.ai_priority ? PRIORITY_COLORS[conv.ai_priority] : ISSUE_COLORS[conv.issue_type] || '#e2e8f0'}`,
-                    transition: 'background 0.1s',
-                  }}
-                >
+                <div key={conv.id} onClick={() => selectConversation(conv)}
+                  style={{ padding: '12px 16px', borderBottom: '1px solid #f1f5f9', cursor: 'pointer', background: selected?.id === conv.id ? '#f0f4ff' : conv.unread ? '#fefce8' : '#fff', borderLeft: `4px solid ${conv.ai_priority ? PRIORITY_COLORS[conv.ai_priority] : ISSUE_COLORS[conv.issue_type] || '#e2e8f0'}`, transition: 'background 0.1s' }}>
                   <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
-                    <input
-                      type="checkbox"
-                      checked={selectedIds.has(conv.id)}
-                      onClick={e => e.stopPropagation()}
-                      onChange={() => toggleSelect(conv.id)}
-                      style={{ marginTop: 3 }}
-                    />
+                    <input type="checkbox" checked={selectedIds.has(conv.id)} onClick={e => e.stopPropagation()} onChange={() => toggleSelect(conv.id)} style={{ marginTop: 3 }} />
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6 }}>
                         <span style={{ fontWeight: conv.unread ? 700 : 500, fontSize: 13, color: '#1e293b', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                           {conv.user_name}
-                          {conv.ai_sentiment && (
-                            <span style={{ marginLeft: 4 }}>{SENTIMENT_EMOJI[conv.ai_sentiment]}</span>
-                          )}
+                          {conv.ai_sentiment && <span style={{ marginLeft: 4 }}>{SENTIMENT_EMOJI[conv.ai_sentiment]}</span>}
                         </span>
                         <span style={{ fontSize: 11, color: '#94a3b8', whiteSpace: 'nowrap' }}>{formatTime(conv.updated_at)}</span>
                       </div>
                       <div style={{ display: 'flex', gap: 4, marginTop: 3, flexWrap: 'wrap' }}>
-                        <span style={{
-                          background: ISSUE_COLORS[conv.issue_type] + '20',
-                          color: ISSUE_COLORS[conv.issue_type],
-                          borderRadius: 4, padding: '1px 6px', fontSize: 11, fontWeight: 600,
-                        }}>{issueLabel(conv.issue_type)}</span>
-                        {conv.ai_priority && (
-                          <span style={{
-                            background: PRIORITY_COLORS[conv.ai_priority] + '20',
-                            color: PRIORITY_COLORS[conv.ai_priority],
-                            borderRadius: 4, padding: '1px 6px', fontSize: 11, fontWeight: 600,
-                          }}>{conv.ai_priority}</span>
-                        )}
-                        <span style={{
-                          background: conv.status === 'open' ? '#dcfce7' : '#f1f5f9',
-                          color: conv.status === 'open' ? '#16a34a' : '#64748b',
-                          borderRadius: 4, padding: '1px 6px', fontSize: 11,
-                        }}>{conv.status}</span>
+                        <span style={{ background: ISSUE_COLORS[conv.issue_type] + '20', color: ISSUE_COLORS[conv.issue_type], borderRadius: 4, padding: '1px 6px', fontSize: 11, fontWeight: 600 }}>{issueLabel(conv.issue_type)}</span>
+                        {conv.ai_priority && <span style={{ background: PRIORITY_COLORS[conv.ai_priority] + '20', color: PRIORITY_COLORS[conv.ai_priority], borderRadius: 4, padding: '1px 6px', fontSize: 11, fontWeight: 600 }}>{conv.ai_priority}</span>}
+                        <span style={{ background: conv.status === 'open' ? '#dcfce7' : '#f1f5f9', color: conv.status === 'open' ? '#16a34a' : '#64748b', borderRadius: 4, padding: '1px 6px', fontSize: 11 }}>{conv.status}</span>
+                        {(conv.custom_tags || []).map(t => <span key={t} style={{ background: '#fef3c7', color: '#92400e', borderRadius: 4, padding: '1px 6px', fontSize: 11 }}>#{t}</span>)}
                       </div>
                       <p style={{ margin: '4px 0 0', fontSize: 12, color: '#64748b', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {conv.ai_summary || conv.last_message.replace(/<[^>]*>/g, '')}
@@ -760,82 +609,84 @@ export default function ConversationsPage() {
           )}
         </div>
 
-        {/* ── Conversation detail ── */}
+        {/* ── Detail panel ── */}
         {selected && (
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+
             {/* Detail header */}
-            <div style={{
-              padding: '12px 16px',
-              background: '#fff',
-              borderBottom: '1px solid #e2e8f0',
-              display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap',
-            }}>
-              <div style={{ flex: 1 }}>
+            <div style={{ padding: '12px 16px', background: '#fff', borderBottom: '1px solid #e2e8f0' }}>
+              {/* Name + actions row */}
+              <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
                 <div style={{ fontWeight: 700, fontSize: 15, color: '#1e293b' }}>{selected.user_name}</div>
-                <div style={{ fontSize: 12, color: '#64748b' }}>{selected.user_email} · {selected.user_location}</div>
+                <span style={{ background: ISSUE_COLORS[selected.issue_type] + '20', color: ISSUE_COLORS[selected.issue_type], borderRadius: 6, padding: '3px 10px', fontSize: 12, fontWeight: 600 }}>{issueLabel(selected.issue_type)}</span>
+                <a href={`https://app.intercom.com/a/apps/${process.env.NEXT_PUBLIC_INTERCOM_WORKSPACE_ID}/inbox/conversation/${selected.id}`}
+                  target="_blank" rel="noopener noreferrer"
+                  style={{ fontSize: 12, color: '#6366f1', textDecoration: 'none', border: '1px solid #6366f1', borderRadius: 6, padding: '3px 10px' }}>
+                  Open in Intercom ↗
+                </a>
+                <button onClick={() => analyzeConversation(selected)} disabled={analyzingId === selected.id} style={btnStyle('#6366f1')}>
+                  {analyzingId === selected.id ? '⏳ Analyzing...' : '🤖 AI Analyze'}
+                </button>
+                <button onClick={() => setSelected(null)} style={{ ...btnStyle('#94a3b8'), marginLeft: 'auto' }}>✕</button>
               </div>
-              <span style={{
-                background: ISSUE_COLORS[selected.issue_type] + '20',
-                color: ISSUE_COLORS[selected.issue_type],
-                borderRadius: 6, padding: '3px 10px', fontSize: 12, fontWeight: 600,
-              }}>{issueLabel(selected.issue_type)}</span>
-              <span style={{ fontSize: 12, color: '#94a3b8' }}>#{selected.id}</span>
-              <a
-                href={`https://app.intercom.com/a/apps/${process.env.NEXT_PUBLIC_INTERCOM_WORKSPACE_ID}/inbox/conversation/${selected.id}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{ fontSize: 12, color: '#6366f1', textDecoration: 'none', border: '1px solid #6366f1', borderRadius: 6, padding: '3px 10px' }}
-              >
-                Open in Intercom ↗
-              </a>
-              <button
-                onClick={() => analyzeConversation(selected)}
-                disabled={analyzingId === selected.id}
-                style={btnStyle('#6366f1')}
-              >
-                {analyzingId === selected.id ? '⏳ Analyzing...' : '🤖 AI Analyze'}
-              </button>
-              <button onClick={() => setSelected(null)} style={btnStyle('#94a3b8')}>✕</button>
+
+              {/* ── Copyable user data chips ── */}
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+                {selected.user_email && selected.user_email !== 'Unknown' && (
+                  <CopyChip label="Email" value={selected.user_email} />
+                )}
+                {selected.user_id && selected.user_id !== '' && (
+                  <CopyChip label="Wallet" value={selected.user_id} color="#7c3aed" />
+                )}
+                {selected.user_location && selected.user_location !== 'Unknown' && (
+                  <CopyChip label="Location" value={selected.user_location} color="#0369a1" />
+                )}
+                <CopyChip label="Conv ID" value={selected.id} color="#64748b" />
+              </div>
+
+              {/* ── Custom tags ── */}
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+                {(selected.custom_tags || []).map(tag => (
+                  <span key={tag} style={{ background: '#fef3c7', color: '#92400e', border: '1px solid #fde68a', borderRadius: 20, padding: '2px 10px', fontSize: 12, display: 'flex', alignItems: 'center', gap: 4 }}>
+                    #{tag}
+                    <button onClick={() => removeTag(tag)} style={{ background: 'none', border: 'none', color: '#b45309', cursor: 'pointer', padding: 0, fontSize: 12, lineHeight: 1 }}>×</button>
+                  </span>
+                ))}
+                <div style={{ display: 'flex', gap: 4 }}>
+                  <input type="text" value={newTag} onChange={e => setNewTag(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') addTag(newTag); }}
+                    placeholder="+ add tag"
+                    style={{ padding: '2px 8px', border: '1px dashed #d1d5db', borderRadius: 20, fontSize: 12, outline: 'none', width: 80, color: '#64748b' }} />
+                  {newTag && <button onClick={() => addTag(newTag)} style={{ ...btnStyle('#f59e0b'), padding: '2px 8px', fontSize: 11 }}>Add</button>}
+                </div>
+              </div>
             </div>
 
-            {/* AI summary bar */}
+            {/* AI summary */}
             {selected.ai_summary && (
-              <div style={{
-                padding: '10px 16px',
-                background: '#f0f4ff',
-                borderBottom: '1px solid #e2e8f0',
-                fontSize: 13,
-              }}>
-                <span style={{ fontWeight: 600, color: '#4338ca' }}>🤖 AI Summary: </span>
+              <div style={{ padding: '10px 16px', background: '#f0f4ff', borderBottom: '1px solid #e2e8f0', fontSize: 13 }}>
+                <span style={{ fontWeight: 600, color: '#4338ca' }}>🤖 Summary: </span>
                 <span style={{ color: '#1e293b' }}>{selected.ai_summary}</span>
                 {selected.ai_priority && (
-                  <span style={{
-                    marginLeft: 10,
-                    background: PRIORITY_COLORS[selected.ai_priority] + '20',
-                    color: PRIORITY_COLORS[selected.ai_priority],
-                    borderRadius: 4, padding: '1px 8px', fontSize: 11, fontWeight: 600,
-                  }}>{selected.ai_priority} priority</span>
+                  <span style={{ marginLeft: 10, background: PRIORITY_COLORS[selected.ai_priority] + '20', color: PRIORITY_COLORS[selected.ai_priority], borderRadius: 4, padding: '1px 8px', fontSize: 11, fontWeight: 600 }}>{selected.ai_priority} priority</span>
                 )}
               </div>
             )}
 
+            {/* Thread loading indicator */}
+            {loadingThread && (
+              <div style={{ padding: '8px 16px', background: '#f8fafc', borderBottom: '1px solid #e2e8f0', fontSize: 12, color: '#94a3b8', display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ animation: 'spin 1s linear infinite', display: 'inline-block' }}>⏳</span>
+                Loading full conversation thread...
+              </div>
+            )}
+
             {/* Messages */}
-            <div style={{ flex: 1, overflowY: 'auto', padding: '16px', display: 'flex', flexDirection: 'column', gap: 10, background: '#f8fafc' }}>
+            <div style={{ flex: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 10, background: '#f8fafc' }}>
               {selected.full_messages && selected.full_messages.length > 0 ? (
                 selected.full_messages.map((msg, i) => (
-                  <div key={i} style={{
-                    display: 'flex',
-                    justifyContent: msg.author_type === 'admin' ? 'flex-end' : 'flex-start',
-                  }}>
-                    <div style={{
-                      maxWidth: '75%',
-                      background: msg.author_type === 'admin' ? '#6366f1' : '#fff',
-                      color: msg.author_type === 'admin' ? '#fff' : '#1e293b',
-                      borderRadius: msg.author_type === 'admin' ? '16px 16px 4px 16px' : '16px 16px 16px 4px',
-                      padding: '10px 14px',
-                      boxShadow: '0 1px 3px rgba(0,0,0,0.08)',
-                      border: msg.author_type === 'user' ? '1px solid #e2e8f0' : 'none',
-                    }}>
+                  <div key={i} style={{ display: 'flex', justifyContent: msg.author_type === 'admin' ? 'flex-end' : 'flex-start' }}>
+                    <div style={{ maxWidth: '75%', background: msg.author_type === 'admin' ? '#6366f1' : '#fff', color: msg.author_type === 'admin' ? '#fff' : '#1e293b', borderRadius: msg.author_type === 'admin' ? '16px 16px 4px 16px' : '16px 16px 16px 4px', padding: '10px 14px', boxShadow: '0 1px 3px rgba(0,0,0,0.08)', border: msg.author_type === 'user' ? '1px solid #e2e8f0' : 'none' }}>
                       <div style={{ fontSize: 10, marginBottom: 4, opacity: 0.7 }}>
                         {msg.author_type === 'admin' ? 'TyAi' : msg.author_name} · {formatTime(msg.created_at)}
                       </div>
@@ -846,57 +697,30 @@ export default function ConversationsPage() {
                   </div>
                 ))
               ) : (
-                <div style={{
-                  background: '#fff', borderRadius: 12, padding: 16,
-                  border: '1px solid #e2e8f0', fontSize: 13, color: '#1e293b',
-                  lineHeight: 1.5, whiteSpace: 'pre-wrap',
-                }}>
+                <div style={{ background: '#fff', borderRadius: 12, padding: 16, border: '1px solid #e2e8f0', fontSize: 13, color: '#1e293b', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
                   {selected.last_message || 'No message content available'}
                 </div>
               )}
+              <div ref={messagesEndRef} />
             </div>
 
             {/* Reply box */}
             <div style={{ padding: '12px 16px', background: '#fff', borderTop: '1px solid #e2e8f0' }}>
               {selected.ai_suggested_reply && (
-                <div style={{
-                  marginBottom: 8, padding: 10, background: '#f0fdf4',
-                  borderRadius: 6, border: '1px solid #bbf7d0', fontSize: 12, color: '#166534',
-                }}>
+                <div style={{ marginBottom: 8, padding: 10, background: '#f0fdf4', borderRadius: 6, border: '1px solid #bbf7d0', fontSize: 12, color: '#166534' }}>
                   <span style={{ fontWeight: 600 }}>💡 TyAi Suggested: </span>
                   {selected.ai_suggested_reply}
-                  <button
-                    onClick={() => setReplyText(selected.ai_suggested_reply || '')}
-                    style={{ marginLeft: 8, fontSize: 11, color: '#16a34a', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}
-                  >
-                    Use this
-                  </button>
+                  <button onClick={() => setReplyText(selected.ai_suggested_reply || '')} style={{ marginLeft: 8, fontSize: 11, color: '#16a34a', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}>Use this</button>
                 </div>
               )}
-
               <div style={{ display: 'flex', gap: 8 }}>
-                <textarea
-                  value={replyText}
-                  onChange={e => setReplyText(e.target.value)}
-                  placeholder="Type your reply..."
-                  rows={3}
-                  style={{
-                    flex: 1, padding: '8px 12px', border: '1px solid #d1d5db',
-                    borderRadius: 8, fontSize: 13, resize: 'vertical', outline: 'none',
-                    fontFamily: 'inherit',
-                  }}
-                />
+                <textarea value={replyText} onChange={e => setReplyText(e.target.value)} placeholder="Type your reply..." rows={3}
+                  style={{ flex: 1, padding: '8px 12px', border: '1px solid #d1d5db', borderRadius: 8, fontSize: 13, resize: 'vertical', outline: 'none', fontFamily: 'inherit' }} />
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                  <button
-                    onClick={sendReply}
-                    disabled={sendingReply || !replyText.trim()}
-                    style={{ ...btnStyle('#6366f1'), opacity: sendingReply || !replyText.trim() ? 0.5 : 1 }}
-                  >
+                  <button onClick={sendReply} disabled={sendingReply || !replyText.trim()} style={{ ...btnStyle('#6366f1'), opacity: sendingReply || !replyText.trim() ? 0.5 : 1 }}>
                     {sendingReply ? 'Sending...' : 'Send Reply'}
                   </button>
-                  <button onClick={() => setReplyText('')} style={btnStyle('#94a3b8')}>
-                    Clear
-                  </button>
+                  <button onClick={() => setReplyText('')} style={btnStyle('#94a3b8')}>Clear</button>
                 </div>
               </div>
             </div>
@@ -907,27 +731,5 @@ export default function ConversationsPage() {
   );
 }
 
-// ─── Style helpers ────────────────────────────────────────────────────────────
-
-const btnStyle = (bg: string): React.CSSProperties => ({
-  background: bg,
-  color: '#fff',
-  border: 'none',
-  borderRadius: 6,
-  padding: '6px 14px',
-  fontSize: 12,
-  fontWeight: 600,
-  cursor: 'pointer',
-  whiteSpace: 'nowrap',
-});
-
-const selectStyle: React.CSSProperties = {
-  padding: '6px 10px',
-  border: '1px solid #d1d5db',
-  borderRadius: 6,
-  fontSize: 12,
-  background: '#fff',
-  color: '#374151',
-  outline: 'none',
-  cursor: 'pointer',
-};
+const btnStyle = (bg: string): React.CSSProperties => ({ background: bg, color: '#fff', border: 'none', borderRadius: 6, padding: '6px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap' });
+const selectStyle: React.CSSProperties = { padding: '6px 10px', border: '1px solid #d1d5db', borderRadius: 6, fontSize: 12, background: '#fff', color: '#374151', outline: 'none', cursor: 'pointer' };
