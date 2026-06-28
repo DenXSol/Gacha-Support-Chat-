@@ -126,6 +126,7 @@ export default function ConversationsPage() {
   const [issueFilter, setIssueFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
   const [priorityFilter, setPriorityFilter] = useState('');
+  const [locationFilter, setLocationFilter] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
   const [searchMode, setSearchMode] = useState<'keyword' | 'ai'>('keyword');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -198,6 +199,7 @@ export default function ConversationsPage() {
     if (issueFilter) result = result.filter(c => c.issue_type === issueFilter);
     if (statusFilter) result = result.filter(c => c.status === statusFilter);
     if (priorityFilter) result = result.filter(c => c.ai_priority === priorityFilter);
+    if (locationFilter) result = result.filter(c => c.user_location.toLowerCase().includes(locationFilter.toLowerCase()));
     if (searchMode === 'keyword' && searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
       result = result.filter(c =>
@@ -210,15 +212,18 @@ export default function ConversationsPage() {
         (c.custom_tags || []).some(t => t.toLowerCase().includes(q))
       );
     }
+    // Default: most recent first. If priority filter active, sort by priority then date.
     result.sort((a, b) => {
-      const pOrder: Record<string, number> = { urgent: 0, high: 1, medium: 2, low: 3 };
-      const ap = a.ai_priority ? pOrder[a.ai_priority] : 4;
-      const bp = b.ai_priority ? pOrder[b.ai_priority] : 4;
-      if (ap !== bp) return ap - bp;
+      if (priorityFilter) {
+        const pOrder: Record<string, number> = { urgent: 0, high: 1, medium: 2, low: 3 };
+        const ap = a.ai_priority ? pOrder[a.ai_priority] : 4;
+        const bp = b.ai_priority ? pOrder[b.ai_priority] : 4;
+        if (ap !== bp) return ap - bp;
+      }
       return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
     });
     setFiltered(result);
-  }, [conversations, issueFilter, statusFilter, priorityFilter, searchQuery, searchMode]);
+  }, [conversations, issueFilter, statusFilter, priorityFilter, locationFilter, searchQuery, searchMode]);
 
   // ─── Tags ─────────────────────────────────────────────────────────────────
 
@@ -532,7 +537,7 @@ export default function ConversationsPage() {
             placeholder={searchMode === 'ai' ? 'AI semantic search...' : 'Name, email, wallet, location, message...'}
             style={{ flex: 1, padding: '6px 12px', border: '1px solid #d1d5db', borderRadius: 0, fontSize: 13, outline: 'none' }} />
           {searchMode === 'ai' && <button onClick={handleAiSearch} disabled={aiSearching} style={{ ...btnStyle('#6366f1'), borderRadius: '0 6px 6px 0', padding: '0 14px' }}>{aiSearching ? '...' : 'Search'}</button>}
-          {(searchQuery || issueFilter || statusFilter || priorityFilter) && <button onClick={() => { setSearchQuery(''); setIssueFilter(''); setStatusFilter(''); setPriorityFilter(''); }} style={{ ...btnStyle('#94a3b8'), borderRadius: '0 6px 6px 0', padding: '0 10px' }}>✕</button>}
+          {(searchQuery || issueFilter || statusFilter || priorityFilter || locationFilter) && <button onClick={() => { setSearchQuery(''); setIssueFilter(''); setStatusFilter(''); setPriorityFilter(''); setLocationFilter(''); }} style={{ ...btnStyle('#94a3b8'), borderRadius: '0 6px 6px 0', padding: '0 10px' }}>✕</button>}
         </div>
         <select value={issueFilter} onChange={e => setIssueFilter(e.target.value)} style={selectStyle}>
           <option value="">All Issues</option>
@@ -551,6 +556,13 @@ export default function ConversationsPage() {
           <option value="medium">🟡 Medium</option>
           <option value="low">🟢 Low</option>
         </select>
+        <input
+          type="text"
+          value={locationFilter}
+          onChange={e => setLocationFilter(e.target.value)}
+          placeholder="📍 Location..."
+          style={{ ...selectStyle, padding: '6px 10px', width: 120 }}
+        />
         <span style={{ fontSize: 12, color: '#64748b', whiteSpace: 'nowrap' }}>{filtered.length} / {conversations.length}{selectedIds.size > 0 && ` · ${selectedIds.size} selected`}</span>
       </div>
 

@@ -2,6 +2,19 @@ import { NextRequest, NextResponse } from 'next/server';
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
+function parseJSON<T>(raw: string, fallback: T): T {
+  try {
+    const clean = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+    return JSON.parse(clean);
+  } catch {
+    try {
+      const match = raw.match(/(\{[\s\S]*\})/);
+      if (match) return JSON.parse(match[1]);
+    } catch { }
+    return fallback;
+  }
+}
+
 export async function POST(request: NextRequest) {
   try {
     const { conversationText, userName, issueType } = await request.json();
@@ -25,15 +38,14 @@ export async function POST(request: NextRequest) {
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 800,
         system: `You are a support analyst for Gacha, a trading card platform.
-Analyze support conversations and return structured summaries.
-Return ONLY valid JSON, no prose, no markdown fences.`,
+Return ONLY a raw JSON object — NO markdown fences, NO backticks, NO prose before or after the JSON.`,
         messages: [
           {
             role: 'user',
-            content: `Analyze this support conversation and return ONLY a JSON object:
+            content: `Analyze this support conversation and return ONLY a JSON object with these exact fields:
 
 {
-  "summary": "2-3 sentence plain English summary of what happened and what the user needs",
+  "summary": "2-3 sentence summary of what happened and what the user needs",
   "problem": "one sentence describing the core problem",
   "current_status": "resolved" | "pending" | "escalation_needed" | "waiting_on_user",
   "next_steps": ["step 1", "step 2", "step 3"],
@@ -60,15 +72,18 @@ ${conversationText}`,
     const data = await res.json();
     const raw = data.content?.[0]?.text?.trim() || '{}';
 
-    try {
-      const parsed = JSON.parse(raw);
-      return NextResponse.json({ success: true, data: parsed });
-    } catch {
-      return NextResponse.json({
-        success: false,
-        error: 'Failed to parse summary',
-      }, { status: 500 });
-    }
+    const fallback = {
+      summary: 'Could not generate summary',
+      problem: 'Unknown',
+      current_status: 'pending',
+      next_steps: [],
+      key_facts: [],
+      urgency: 'medium',
+      suggested_reply: '',
+    };
+
+    const parsed = parseJSON(raw, fallback);
+    return NextResponse.json({ success: true, data: parsed });
   } catch (error: any) {
     console.error('Summarize error:', error);
     return NextResponse.json({ error: error.message || 'Summary failed' }, { status: 500 });

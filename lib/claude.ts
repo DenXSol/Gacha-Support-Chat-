@@ -6,22 +6,35 @@ interface ClaudeMessage {
   content: string;
 }
 
+// ── Robust JSON parser — strips markdown fences before parsing ────────────────
+function parseJSON<T>(raw: string, fallback: T): T {
+  try {
+    // Strip ```json ... ``` or ``` ... ``` fences
+    const clean = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+    return JSON.parse(clean);
+  } catch {
+    try {
+      // Try extracting first JSON object/array from response
+      const match = raw.match(/(\[[\s\S]*\]|\{[\s\S]*\})/);
+      if (match) return JSON.parse(match[1]);
+    } catch { }
+    return fallback;
+  }
+}
+
 async function callClaude(prompt: string, systemPrompt?: string, maxTokens = 1024): Promise<string> {
   if (!ANTHROPIC_API_KEY) {
     throw new Error('ANTHROPIC_API_KEY not set in environment variables');
   }
 
   const messages: ClaudeMessage[] = [{ role: 'user', content: prompt }];
-
   const body: any = {
-    model: 'claude-haiku-4-5-20251001', // Fast + cheap for per-conversation analysis
+    model: 'claude-haiku-4-5-20251001',
     max_tokens: maxTokens,
     messages,
   };
 
-  if (systemPrompt) {
-    body.system = systemPrompt;
-  }
+  if (systemPrompt) body.system = systemPrompt;
 
   const res = await fetch(API_URL, {
     method: 'POST',
@@ -42,7 +55,7 @@ async function callClaude(prompt: string, systemPrompt?: string, maxTokens = 102
   return data.content?.[0]?.text || '';
 }
 
-// ─── Feature: Analyze a full conversation ────────────────────────────────────
+// ─── Analyze conversation ─────────────────────────────────────────────────────
 
 export interface ConversationAnalysis {
   summary: string;
@@ -59,21 +72,32 @@ export async function analyzeConversation(
   conversationText: string,
   userName: string
 ): Promise<ConversationAnalysis> {
-  const system = `You are a support analyst for Gacha, a trading card platform. 
-Gacha sells Pokemon and collectible card packs, handles shipping of physical cards, 
-PSA grading/certification, withdrawals, deposits, and KYC verification.
-Your job is to analyze customer support conversations and return structured JSON only — no prose, no markdown fences.`;
+  const fallback: ConversationAnalysis = {
+    summary: 'Unable to analyze conversation',
+    issue_type: 'general',
+    priority: 'medium',
+    priority_reason: 'Auto-analysis failed',
+    sentiment: 'neutral',
+    suggested_reply: '',
+    key_facts: [],
+    action_needed: false,
+  };
 
-  const prompt = `Analyze this customer support conversation and return ONLY a JSON object with exactly these fields:
+  const system = `You are a support analyst for Gacha, a trading card platform.
+Gacha sells Pokemon and collectible card packs, handles shipping of physical cards,
+PSA grading/certification, withdrawals, deposits, and KYC verification.
+Return ONLY valid JSON — no prose, no markdown fences, no backticks.`;
+
+  const prompt = `Analyze this customer support conversation and return ONLY a JSON object:
 
 {
   "summary": "1-2 sentence plain English summary of the issue",
-  "issue_type": one of: "withdrawal" | "deposit" | "shipping" | "complaint" | "card_redemption" | "kyc" | "general",
-  "priority": one of: "low" | "medium" | "high" | "urgent",
+  "issue_type": "withdrawal" | "deposit" | "shipping" | "complaint" | "card_redemption" | "kyc" | "general",
+  "priority": "low" | "medium" | "high" | "urgent",
   "priority_reason": "brief reason for the priority level",
-  "sentiment": one of: "positive" | "neutral" | "frustrated" | "angry",
+  "sentiment": "positive" | "neutral" | "frustrated" | "angry",
   "suggested_reply": "a helpful 2-3 sentence reply to send to the customer",
-  "key_facts": ["fact 1", "fact 2", "fact 3"],
+  "key_facts": ["fact 1", "fact 2"],
   "action_needed": true or false
 }
 
@@ -83,31 +107,15 @@ Priority guide:
 - medium: shipping delay, deposit issue, unclear complaint
 - low: general question, status check, minor issue
 
-Customer name: ${userName}
-
+Customer: ${userName}
 Conversation:
 ${conversationText}`;
 
   const raw = await callClaude(prompt, system, 1000);
-
-  try {
-    return JSON.parse(raw);
-  } catch {
-    // Fallback if JSON parse fails
-    return {
-      summary: 'Unable to analyze conversation',
-      issue_type: 'general',
-      priority: 'medium',
-      priority_reason: 'Auto-analysis failed',
-      sentiment: 'neutral',
-      suggested_reply: '',
-      key_facts: [],
-      action_needed: false,
-    };
-  }
+  return parseJSON(raw, fallback);
 }
 
-// ─── Feature: Smart semantic search ──────────────────────────────────────────
+// ─── Semantic search — batched across ALL conversations ───────────────────────
 
 export async function semanticSearch(
   query: string,
@@ -115,32 +123,39 @@ export async function semanticSearch(
 ): Promise<{ id: string; relevance: number; reason: string }[]> {
   if (conversations.length === 0) return [];
 
-  const system = `You are a search engine for a customer support system. 
-Return ONLY valid JSON, no prose.`;
+  const system = `You are a search engine for a customer support system.
+Return ONLY valid JSON array — no prose, no markdown fences, no backticks.`;
 
-  // Batch up to 30 conversations per search call
-  const batch = conversations.slice(0, 30);
+  const BATCH_SIZE = 50;
+  const allResults: { id: string; relevance: number; reason: string }[] = [];
 
-  const prompt = `Search query: "${query}"
+  // Search in batches of 50 to cover all 500 conversations
+  for (let i = 0; i < conversations.length; i += BATCH_SIZE) {
+    const batch = conversations.slice(i, i + BATCH_SIZE);
 
-Find conversations relevant to this query. Return ONLY a JSON array of matches, sorted by relevance:
+    const prompt = `Search query: "${query}"
+
+Find conversations relevant to this query. Return ONLY a JSON array sorted by relevance:
 [{"id": "conv_id", "relevance": 0-100, "reason": "why it matches"}]
 
 Only include conversations with relevance > 30. If nothing matches, return [].
 
-Conversations to search:
+Conversations:
 ${batch.map(c => `ID: ${c.id}\nUser: ${c.user}\nText: ${c.text.substring(0, 300)}`).join('\n---\n')}`;
 
-  const raw = await callClaude(prompt, system, 2000);
-
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return [];
+    const raw = await callClaude(prompt, system, 2000);
+    const batchResults = parseJSON<{ id: string; relevance: number; reason: string }[]>(raw, []);
+    allResults.push(...batchResults);
   }
+
+  // Sort by relevance descending and deduplicate
+  const seen = new Set<string>();
+  return allResults
+    .filter(r => { if (seen.has(r.id)) return false; seen.add(r.id); return true; })
+    .sort((a, b) => b.relevance - a.relevance);
 }
 
-// ─── Feature: Detect top issues from a batch ─────────────────────────────────
+// ─── Detect top issues ────────────────────────────────────────────────────────
 
 export interface TopIssue {
   issue: string;
@@ -154,7 +169,7 @@ export async function detectTopIssues(
 ): Promise<TopIssue[]> {
   if (conversations.length === 0) return [];
 
-  const system = `You are a support analytics tool. Return ONLY valid JSON.`;
+  const system = `You are a support analytics tool. Return ONLY valid JSON — no prose, no markdown fences.`;
 
   const prompt = `Analyze these ${conversations.length} support conversations and identify the top recurring issues.
 
@@ -170,45 +185,37 @@ Conversations:
 ${conversations.map(c => `ID:${c.id} | Type:${c.issue_type} | ${c.summary}`).join('\n')}`;
 
   const raw = await callClaude(prompt, system, 2000);
-
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return [];
-  }
+  return parseJSON(raw, []);
 }
 
-// ─── Feature: Suggest reply for a specific issue ─────────────────────────────
+// ─── Suggest reply ────────────────────────────────────────────────────────────
 
 export async function suggestReply(
   conversationText: string,
   issueType: string,
-  agentName = 'Support'
+  agentName = 'Tai'
 ): Promise<string> {
-  const system = `You are a helpful, friendly customer support agent for Gacha, a trading card platform. 
-Write professional but warm replies. Be concise (2-4 sentences). 
+  const system = `You are a helpful, friendly customer support agent for Gacha, a trading card platform.
+Write professional but warm replies. Be concise (2-4 sentences).
 Don't make promises you can't keep. Don't reveal internal systems.`;
 
   const prompt = `Write a support reply for this ${issueType} issue.
-
-Agent name to sign off as: ${agentName}
-
+Agent name: ${agentName}
 Conversation:
 ${conversationText}
-
-Write ONLY the reply message, no subject line, no JSON, just the message text.`;
+Write ONLY the reply message text — no subject line, no JSON, no markdown.`;
 
   return await callClaude(prompt, system, 500);
 }
 
-// ─── Feature: Categorize a single conversation ───────────────────────────────
+// ─── Categorize with AI ───────────────────────────────────────────────────────
 
 export async function categorizeWithAI(text: string): Promise<{
   category: string;
   confidence: number;
   reasoning: string;
 }> {
-  const system = `You are a support ticket classifier for Gacha. Return ONLY valid JSON.`;
+  const system = `You are a support ticket classifier for Gacha. Return ONLY valid JSON — no markdown fences.`;
 
   const prompt = `Classify this support conversation into ONE category.
 
@@ -217,7 +224,7 @@ Categories:
 - deposit: user depositing money or crypto
 - shipping: delivery, tracking, lost packages
 - complaint: damaged goods, wrong order, refund request, fraud
-- card_redemption: redeeming certificates, PSA grading, vault claims  
+- card_redemption: redeeming certificates, PSA grading, vault claims
 - kyc: identity verification, document submission
 - general: everything else
 
@@ -226,10 +233,5 @@ Return ONLY: {"category": "...", "confidence": 0-100, "reasoning": "brief explan
 Text: ${text}`;
 
   const raw = await callClaude(prompt, system, 300);
-
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return { category: 'general', confidence: 0, reasoning: 'Parse error' };
-  }
+  return parseJSON(raw, { category: 'general', confidence: 0, reasoning: 'Parse error' });
 }

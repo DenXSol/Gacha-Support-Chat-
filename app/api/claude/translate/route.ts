@@ -2,6 +2,19 @@ import { NextRequest, NextResponse } from 'next/server';
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
+function parseJSON<T>(raw: string, fallback: T): T {
+  try {
+    const clean = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+    return JSON.parse(clean);
+  } catch {
+    try {
+      const match = raw.match(/(\{[\s\S]*\})/);
+      if (match) return JSON.parse(match[1]);
+    } catch { }
+    return fallback;
+  }
+}
+
 export async function POST(request: NextRequest) {
   try {
     const { text, targetLanguage, autoDetect } = await request.json();
@@ -26,20 +39,15 @@ export async function POST(request: NextRequest) {
       body: JSON.stringify({
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 600,
-        system: `You are a translation assistant. Translate text accurately and naturally.
-Return ONLY a JSON object with these exact fields:
-{
-  "translated": "the translated text",
-  "detectedLanguage": "the language the original text was written in",
-  "targetLanguage": "the language you translated to"
-}
-No prose, no explanation, just the JSON.`,
+        system: `You are a translation assistant.
+Return ONLY a raw JSON object — NO markdown fences, NO backticks, NO prose, NO explanation.
+Example output: {"translated": "hello", "detectedLanguage": "Spanish", "targetLanguage": "English"}`,
         messages: [
           {
             role: 'user',
             content: autoDetect
-              ? `Detect the language of this text and translate it to English. If it is already English, translate it to the most likely language the user speaks based on context clues, or just return it as-is with detectedLanguage: "English".\n\nText: ${text}`
-              : `Translate this text to ${target}.\n\nText: ${text}`,
+              ? `Detect the language of this text and translate it to English. If it is already English, set translated to the original text and detectedLanguage to "English".\n\nText: ${text}`
+              : `Translate this text to ${target}. Detect what language it is written in.\n\nText: ${text}`,
           },
         ],
       }),
@@ -53,12 +61,12 @@ No prose, no explanation, just the JSON.`,
     const data = await res.json();
     const raw = data.content?.[0]?.text?.trim() || '{}';
 
-    try {
-      const parsed = JSON.parse(raw);
-      return NextResponse.json({ success: true, ...parsed });
-    } catch {
-      return NextResponse.json({ success: true, translated: raw, detectedLanguage: 'Unknown', targetLanguage: target });
-    }
+    const parsed = parseJSON<{ translated: string; detectedLanguage: string; targetLanguage: string }>(
+      raw,
+      { translated: text, detectedLanguage: 'Unknown', targetLanguage: target }
+    );
+
+    return NextResponse.json({ success: true, ...parsed });
   } catch (error: any) {
     console.error('Translate error:', error);
     return NextResponse.json({ error: error.message || 'Translation failed' }, { status: 500 });
