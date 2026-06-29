@@ -13,6 +13,8 @@ export interface IntercomConversation {
   unread: boolean;
   replied: boolean;
   tags?: string[];
+  ai_participated?: boolean;
+  escalated_to_human?: boolean;
 }
 
 export interface MessagePart {
@@ -26,6 +28,7 @@ export interface IntercomContact {
   id: string;
   name: string;
   email: string;
+  location_str?: string;
   custom_attributes?: {
     location?: string;
     user_id?: string;
@@ -129,7 +132,7 @@ export async function fetchAllConversations(): Promise<IntercomConversation[]> {
           user_id: resolveWallet(contact, contactId || ''),
           user_name: contact?.name || conv.source?.author?.name || 'Unknown',
           user_email: contact?.email || 'Unknown',
-          user_location: contact?.custom_attributes?.location || 'Unknown',
+          user_location: contact?.location_str || 'Unknown',
           issue_type: categorizeConversation(conv),
           status: conv.state || 'open',
           created_at: new Date(conv.created_at * 1000).toISOString(),
@@ -139,6 +142,8 @@ export async function fetchAllConversations(): Promise<IntercomConversation[]> {
           unread: conv.read === false,
           replied: hasAdminReply(conv),
           tags: conv.tags?.tags?.map((t: any) => t.name) || [],
+          ai_participated: detectAIParticipation(conv),
+          escalated_to_human: detectEscalation(conv),
         };
       })
     );
@@ -168,7 +173,7 @@ export async function fetchSingleConversation(conversationId: string): Promise<I
       user_id: resolveWallet(contact, contactId || ''),
       user_name: contact?.name || conv.source?.author?.name || 'Unknown',
       user_email: contact?.email || 'Unknown',
-      user_location: contact?.custom_attributes?.location || 'Unknown',
+      user_location: contact?.location_str || 'Unknown',
       issue_type: categorizeConversation(conv),
       status: conv.state || 'open',
       created_at: new Date(conv.created_at * 1000).toISOString(),
@@ -178,6 +183,8 @@ export async function fetchSingleConversation(conversationId: string): Promise<I
       unread: conv.read === false,
       replied: hasAdminReply(conv),
       tags: conv.tags?.tags?.map((t: any) => t.name) || [],
+      ai_participated: detectAIParticipation(conv),
+      escalated_to_human: detectEscalation(conv),
     };
   } catch (error) {
     console.error('Error fetching single conversation:', error);
@@ -190,10 +197,19 @@ async function fetchContact(contactId: string): Promise<IntercomContact | null> 
     const res = await fetchWithTimeout(`${API_BASE}/contacts/${contactId}`);
     if (!res.ok) return null;
     const data = await res.json();
+
+    // Intercom stores location as a nested object: { city_name, region_name, country_name }
+    const loc = data.location || {};
+    const locParts = [loc.city_name, loc.region_name, loc.country_name].filter(Boolean);
+    const location_str = locParts.length > 0
+      ? locParts.join(', ')
+      : (data.custom_attributes?.location || 'Unknown');
+
     return {
       id: data.id,
       name: data.name || 'Unknown',
       email: data.email || 'Unknown',
+      location_str,
       custom_attributes: data.custom_attributes || {},
     };
   } catch {
@@ -256,6 +272,36 @@ function getLastMessage(conversation: any): string {
 function hasAdminReply(conversation: any): boolean {
   const parts = conversation.conversation_parts?.conversation_parts || [];
   return parts.some((p: any) => p.author?.type === 'admin' && p.body);
+}
+
+// ── Detect if Intercom's Fin AI agent participated ──
+// Intercom exposes ai_agent_participated and an ai_agent object on conversations.
+function detectAIParticipation(conversation: any): boolean {
+  if (conversation.ai_agent_participated === true) return true;
+  if (conversation.ai_agent && Object.keys(conversation.ai_agent).length > 0) return true;
+  // Fallback: a bot/operator authored a part
+  const parts = conversation.conversation_parts?.conversation_parts || [];
+  return parts.some((p: any) => p.author?.type === 'bot');
+}
+
+// ── Detect if the conversation was escalated to a human agent ──
+// Signals: assigned to a human admin, OR a human (non-bot) admin replied,
+// OR the user explicitly requested a human ("chat with agent" etc).
+function detectEscalation(conversation: any): boolean {
+  // Assigned to a human admin (not the AI/unassigned)
+  if (conversation.admin_assignee_id && conversation.admin_assignee_id !== null) return true;
+
+  // A human admin (not a bot) posted a reply
+  const parts = conversation.conversation_parts?.conversation_parts || [];
+  const humanReplied = parts.some((p: any) =>
+    p.author?.type === 'admin' && p.body && p.author?.name && p.author.name.toLowerCase() !== 'fin'
+  );
+  if (humanReplied) return true;
+
+  // User explicitly asked for a human
+  const sourceBody = (conversation.source?.body || '').toLowerCase();
+  const text = parts.map((p: any) => p.body || '').join(' ').toLowerCase() + ' ' + sourceBody;
+  return /chat with agent|talk to (a |an )?(human|agent|person)|speak (to|with) (a |an )?(human|agent|someone)|need (a )?human/i.test(text);
 }
 
 export async function sendReply(
