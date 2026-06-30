@@ -37,6 +37,9 @@ interface Conversation {
   full_messages?: MessagePart[];
   unread: boolean;
   replied: boolean;
+  ai_participated?: boolean;
+  escalated_to_human?: boolean;
+  csat_rating?: number;
   tags?: string[];
   custom_tags?: string[];
   ai_summary?: string;
@@ -127,6 +130,9 @@ export default function ConversationsPage() {
   const [statusFilter, setStatusFilter] = useState('');
   const [priorityFilter, setPriorityFilter] = useState('');
   const [locationFilter, setLocationFilter] = useState('');
+  const [needsResponse, setNeedsResponse] = useState(false);
+  const [handlingFilter, setHandlingFilter] = useState<'' | 'ai' | 'human'>('');
+  const [sortBy, setSortBy] = useState<'newest' | 'oldest' | 'waiting'>('newest');
   const [searchQuery, setSearchQuery] = useState('');
   const [searchMode, setSearchMode] = useState<'keyword' | 'ai'>('keyword');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -218,6 +224,11 @@ export default function ConversationsPage() {
     if (statusFilter) result = result.filter(c => c.status === statusFilter);
     if (priorityFilter) result = result.filter(c => c.ai_priority === priorityFilter);
     if (locationFilter) result = result.filter(c => (c.user_location || '').toLowerCase().includes(locationFilter.toLowerCase()));
+    // Needs response: still open and no agent reply yet
+    if (needsResponse) result = result.filter(c => !c.replied && c.status === 'open');
+    // Handling: AI = Fin still handling (not handed to a human); Human = escalated to a person
+    if (handlingFilter === 'ai') result = result.filter(c => !c.escalated_to_human);
+    if (handlingFilter === 'human') result = result.filter(c => c.escalated_to_human);
     if (searchMode === 'keyword' && searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
       result = result.filter(c =>
@@ -230,18 +241,16 @@ export default function ConversationsPage() {
         (c.custom_tags || []).some(t => t.toLowerCase().includes(q))
       );
     }
-    // Default: most recent first. If priority filter active, sort by priority then date.
+    // Sort applies on top of ALL active filters.
     result.sort((a, b) => {
-      if (priorityFilter) {
-        const pOrder: Record<string, number> = { urgent: 0, high: 1, medium: 2, low: 3 };
-        const ap = a.ai_priority ? pOrder[a.ai_priority] : 4;
-        const bp = b.ai_priority ? pOrder[b.ai_priority] : 4;
-        if (ap !== bp) return ap - bp;
-      }
-      return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
+      const ta = new Date(a.updated_at).getTime();
+      const tb = new Date(b.updated_at).getTime();
+      if (sortBy === 'oldest') return ta - tb;
+      if (sortBy === 'waiting') return ta - tb; // longest since last update first
+      return tb - ta; // newest first (default)
     });
     setFiltered(result);
-  }, [conversations, issueFilter, statusFilter, priorityFilter, locationFilter, searchQuery, searchMode]);
+  }, [conversations, issueFilter, statusFilter, priorityFilter, locationFilter, needsResponse, handlingFilter, sortBy, searchQuery, searchMode]);
 
   // ─── Tags ─────────────────────────────────────────────────────────────────
 
@@ -476,7 +485,7 @@ export default function ConversationsPage() {
   // ─── Render ───────────────────────────────────────────────────────────────
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: '#f8fafc' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: 'var(--bg)', color: 'var(--text)' }}>
 
       {/* Tai bar */}
       <div style={{ background: 'linear-gradient(135deg, #1e1b4b 0%, #312e81 100%)', borderBottom: '1px solid #4338ca', padding: showTai ? '12px 20px' : '8px 20px' }}>
@@ -533,8 +542,8 @@ export default function ConversationsPage() {
       </div>
 
       {/* Top bar */}
-      <div style={{ padding: '10px 20px', background: '#fff', borderBottom: '1px solid #e2e8f0', display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-        <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: '#1e293b' }}>Conversations</h1>
+      <div style={{ padding: '10px 20px', background: 'var(--surface)', borderBottom: '1px solid var(--border)', display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+        <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: 'var(--text)' }}>Conversations</h1>
         {urgentCount > 0 && <span style={{ background: '#fef2f2', color: '#ef4444', border: '1px solid #fecaca', borderRadius: 20, padding: '2px 10px', fontSize: 12, fontWeight: 600 }}>🚨 {urgentCount} urgent</span>}
         {unrepliedCount > 0 && <span style={{ background: '#fef9c3', color: '#854d0e', border: '1px solid #fde047', borderRadius: 20, padding: '2px 10px', fontSize: 12, fontWeight: 600 }}>💬 {unrepliedCount} unreplied</span>}
         <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -546,7 +555,7 @@ export default function ConversationsPage() {
       </div>
 
       {/* Filters */}
-      <div style={{ padding: '10px 20px', background: '#fff', borderBottom: '1px solid #e2e8f0', display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+      <div style={{ padding: '10px 20px', background: 'var(--surface)', borderBottom: '1px solid var(--border)', display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
         <div style={{ display: 'flex', flex: 1, minWidth: 280, gap: 0 }}>
           <select value={searchMode} onChange={e => setSearchMode(e.target.value as any)} style={{ ...selectStyle, borderRadius: '6px 0 0 6px', borderRight: 'none', width: 100 }}>
             <option value="keyword">🔍 Text</option>
@@ -554,10 +563,25 @@ export default function ConversationsPage() {
           </select>
           <input type="text" value={searchQuery} onChange={e => setSearchQuery(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && searchMode === 'ai') handleAiSearch(); }}
             placeholder={searchMode === 'ai' ? 'AI semantic search...' : 'Name, email, wallet, location, message...'}
-            style={{ flex: 1, padding: '6px 12px', border: '1px solid #d1d5db', borderRadius: 0, fontSize: 13, outline: 'none' }} />
+            style={{ flex: 1, padding: '6px 12px', border: '1px solid var(--border-strong)', background: 'var(--surface)', color: 'var(--text)', borderRadius: 0, fontSize: 13, outline: 'none' }} />
           {searchMode === 'ai' && <button onClick={handleAiSearch} disabled={aiSearching} style={{ ...btnStyle('#6366f1'), borderRadius: '0 6px 6px 0', padding: '0 14px' }}>{aiSearching ? '...' : 'Search'}</button>}
-          {(searchQuery || issueFilter || statusFilter || priorityFilter || locationFilter) && <button onClick={() => { setSearchQuery(''); setIssueFilter(''); setStatusFilter(''); setPriorityFilter(''); setLocationFilter(''); }} style={{ ...btnStyle('#94a3b8'), borderRadius: '0 6px 6px 0', padding: '0 10px' }}>✕</button>}
+          {(searchQuery || issueFilter || statusFilter || priorityFilter || locationFilter || needsResponse || handlingFilter) && <button onClick={() => { setSearchQuery(''); setIssueFilter(''); setStatusFilter(''); setPriorityFilter(''); setLocationFilter(''); setNeedsResponse(false); setHandlingFilter(''); }} style={{ ...btnStyle('#94a3b8'), borderRadius: '0 6px 6px 0', padding: '0 10px' }}>✕</button>}
         </div>
+        <button onClick={() => setNeedsResponse(v => !v)}
+          title="Open conversations with no agent reply yet"
+          style={{ ...selectStyle, cursor: 'pointer', fontWeight: 600, background: needsResponse ? '#ef4444' : 'var(--surface)', color: needsResponse ? '#fff' : 'var(--text)', borderColor: needsResponse ? '#ef4444' : 'var(--border-strong)' }}>
+          📩 Needs response
+        </button>
+        <select value={handlingFilter} onChange={e => setHandlingFilter(e.target.value as any)} style={selectStyle} title="Who is handling the conversation">
+          <option value="">All handling</option>
+          <option value="ai">🤖 AI (Fin) handling</option>
+          <option value="human">🧑 Human (escalated)</option>
+        </select>
+        <select value={sortBy} onChange={e => setSortBy(e.target.value as any)} style={selectStyle} title="Sort order (applies with every filter)">
+          <option value="newest">↓ Newest first</option>
+          <option value="oldest">↑ Oldest first</option>
+          <option value="waiting">⏳ Waiting longest</option>
+        </select>
         <select value={issueFilter} onChange={e => setIssueFilter(e.target.value)} style={selectStyle}>
           <option value="">All Issues</option>
           {Object.keys(ISSUE_COLORS).map(k => <option key={k} value={k}>{issueLabel(k)}</option>)}
@@ -582,35 +606,35 @@ export default function ConversationsPage() {
           placeholder="📍 Location..."
           style={{ ...selectStyle, padding: '6px 10px', width: 120 }}
         />
-        <span style={{ fontSize: 12, color: '#64748b', whiteSpace: 'nowrap' }}>{filtered.length} / {conversations.length}{selectedIds.size > 0 && ` · ${selectedIds.size} selected`}</span>
+        <span style={{ fontSize: 12, color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>{filtered.length} / {conversations.length}{selectedIds.size > 0 && ` · ${selectedIds.size} selected`}</span>
       </div>
 
       {/* Main */}
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
 
         {/* List */}
-        <div style={{ width: selected ? '35%' : '100%', borderRight: '1px solid #e2e8f0', overflowY: 'auto', background: '#fff', transition: 'width 0.2s' }}>
+        <div style={{ width: selected ? '35%' : '100%', borderRight: '1px solid var(--border)', overflowY: 'auto', background: 'var(--surface)', transition: 'width 0.2s' }}>
           {loading ? (
-            <div style={{ padding: 40, textAlign: 'center', color: '#94a3b8' }}>Loading conversations...</div>
+            <div style={{ padding: 40, textAlign: 'center', color: 'var(--text-faint)' }}>Loading conversations...</div>
           ) : filtered.length === 0 ? (
-            <div style={{ padding: 40, textAlign: 'center', color: '#94a3b8' }}>No conversations found</div>
+            <div style={{ padding: 40, textAlign: 'center', color: 'var(--text-faint)' }}>No conversations found</div>
           ) : (
             <>
-              <div style={{ padding: '8px 16px', borderBottom: '1px solid #f1f5f9', display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{ padding: '8px 16px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 8 }}>
                 <input type="checkbox" checked={selectedIds.size === filtered.length && filtered.length > 0} onChange={selectAll} />
-                <span style={{ fontSize: 12, color: '#64748b' }}>Select all ({filtered.length})</span>
+                <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Select all ({filtered.length})</span>
               </div>
               {filtered.map(conv => (
                 <div key={conv.id} onClick={() => selectConversation(conv)}
-                  style={{ padding: '12px 16px', borderBottom: '1px solid #f1f5f9', cursor: 'pointer', background: selected?.id === conv.id ? '#f0f4ff' : conv.unread ? '#fefce8' : '#fff', borderLeft: `4px solid ${conv.ai_priority ? PRIORITY_COLORS[conv.ai_priority] : ISSUE_COLORS[conv.issue_type] || '#e2e8f0'}`, transition: 'background 0.1s' }}>
+                  style={{ padding: '12px 16px', borderBottom: '1px solid var(--border)', cursor: 'pointer', background: selected?.id === conv.id ? 'var(--row-active)' : conv.unread ? 'var(--row-unread)' : 'var(--surface)', borderLeft: `4px solid ${conv.ai_priority ? PRIORITY_COLORS[conv.ai_priority] : ISSUE_COLORS[conv.issue_type] || 'var(--border)'}`, transition: 'background 0.1s' }}>
                   <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
                     <input type="checkbox" checked={selectedIds.has(conv.id)} onClick={e => e.stopPropagation()} onChange={() => toggleSelect(conv.id)} style={{ marginTop: 3 }} />
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6 }}>
-                        <span style={{ fontWeight: conv.unread ? 700 : 500, fontSize: 13, color: '#1e293b', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        <span style={{ fontWeight: conv.unread ? 700 : 500, fontSize: 13, color: 'var(--text)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                           {conv.user_name}{conv.ai_sentiment && <span style={{ marginLeft: 4 }}>{SENTIMENT_EMOJI[conv.ai_sentiment]}</span>}
                         </span>
-                        <span style={{ fontSize: 11, color: '#94a3b8', whiteSpace: 'nowrap' }}>{formatTime(conv.updated_at)}</span>
+                        <span style={{ fontSize: 11, color: 'var(--text-faint)', whiteSpace: 'nowrap' }}>{formatTime(conv.updated_at)}</span>
                       </div>
                       <div style={{ display: 'flex', gap: 4, marginTop: 3, flexWrap: 'wrap' }}>
                         <span style={{ background: ISSUE_COLORS[conv.issue_type] + '20', color: ISSUE_COLORS[conv.issue_type], borderRadius: 4, padding: '1px 6px', fontSize: 11, fontWeight: 600 }}>{issueLabel(conv.issue_type)}</span>
@@ -618,7 +642,7 @@ export default function ConversationsPage() {
                         <span style={{ background: conv.status === 'open' ? '#dcfce7' : '#f1f5f9', color: conv.status === 'open' ? '#16a34a' : '#64748b', borderRadius: 4, padding: '1px 6px', fontSize: 11 }}>{conv.status}</span>
                         {(conv.custom_tags || []).map(t => <span key={t} style={{ background: '#fef3c7', color: '#92400e', borderRadius: 4, padding: '1px 6px', fontSize: 11 }}>#{t}</span>)}
                       </div>
-                      <p style={{ margin: '4px 0 0', fontSize: 12, color: '#64748b', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      <p style={{ margin: '4px 0 0', fontSize: 12, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {conv.ai_summary || conv.last_message.replace(/<[^>]*>/g, '')}
                       </p>
                     </div>
@@ -634,9 +658,9 @@ export default function ConversationsPage() {
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
 
             {/* Header */}
-            <div style={{ padding: '12px 16px', background: '#fff', borderBottom: '1px solid #e2e8f0' }}>
+            <div style={{ padding: '12px 16px', background: 'var(--surface)', borderBottom: '1px solid var(--border)' }}>
               <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
-                <div style={{ fontWeight: 700, fontSize: 15, color: '#1e293b' }}>{selected.user_name}</div>
+                <div style={{ fontWeight: 700, fontSize: 15, color: 'var(--text)' }}>{selected.user_name}</div>
                 <span style={{ background: ISSUE_COLORS[selected.issue_type] + '20', color: ISSUE_COLORS[selected.issue_type], borderRadius: 6, padding: '3px 10px', fontSize: 12, fontWeight: 600 }}>{issueLabel(selected.issue_type)}</span>
                 <a href={`https://app.intercom.com/a/apps/${process.env.NEXT_PUBLIC_INTERCOM_WORKSPACE_ID}/inbox/conversation/${selected.id}`}
                   target="_blank" rel="noopener noreferrer"
@@ -755,26 +779,29 @@ export default function ConversationsPage() {
 
             {/* Loading thread */}
             {loadingThread && (
-              <div style={{ padding: '8px 16px', background: '#f8fafc', borderBottom: '1px solid #e2e8f0', fontSize: 12, color: '#94a3b8' }}>
+              <div style={{ padding: '8px 16px', background: 'var(--surface-2)', borderBottom: '1px solid var(--border)', fontSize: 12, color: 'var(--text-faint)' }}>
                 ⏳ Loading full conversation thread...
               </div>
             )}
 
             {/* Messages */}
-            <div style={{ flex: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 10, background: '#f8fafc' }}>
+            <div style={{ flex: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 10, background: 'var(--bg)' }}>
               {selected.full_messages && selected.full_messages.length > 0 ? (
-                selected.full_messages.map((msg, i) => (
-                  <div key={i} style={{ display: 'flex', justifyContent: msg.author_type === 'admin' ? 'flex-end' : 'flex-start' }}>
-                    <div style={{ maxWidth: '75%', background: msg.author_type === 'admin' ? '#6366f1' : '#fff', color: msg.author_type === 'admin' ? '#fff' : '#1e293b', borderRadius: msg.author_type === 'admin' ? '16px 16px 4px 16px' : '16px 16px 16px 4px', padding: '10px 14px', boxShadow: '0 1px 3px rgba(0,0,0,0.08)', border: msg.author_type === 'user' ? '1px solid #e2e8f0' : 'none' }}>
-                      <div style={{ fontSize: 10, marginBottom: 4, opacity: 0.7 }}>
-                        {msg.author_type === 'admin' ? 'Tai' : msg.author_name} · {formatTime(msg.created_at)}
+                selected.full_messages.map((msg, i) => {
+                  const isAgent = msg.author_type === 'admin';
+                  return (
+                    <div key={i} style={{ display: 'flex', justifyContent: isAgent ? 'flex-end' : 'flex-start' }}>
+                      <div style={{ maxWidth: '75%', background: isAgent ? 'var(--bubble-me-bg)' : 'var(--bubble-them-bg)', color: isAgent ? 'var(--bubble-me-text)' : 'var(--bubble-them-text)', borderRadius: isAgent ? '18px 18px 4px 18px' : '18px 18px 18px 4px', padding: '10px 14px', boxShadow: '0 1px 2px rgba(0,0,0,0.12)' }}>
+                        <div style={{ fontSize: 10, marginBottom: 4, opacity: 0.7 }}>
+                          {isAgent ? 'Tai' : msg.author_name} · {formatTime(msg.created_at)}
+                        </div>
+                        <div style={{ fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{msg.body.replace(/<[^>]*>/g, '')}</div>
                       </div>
-                      <div style={{ fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{msg.body.replace(/<[^>]*>/g, '')}</div>
                     </div>
-                  </div>
-                ))
+                  );
+                })
               ) : (
-                <div style={{ background: '#fff', borderRadius: 12, padding: 16, border: '1px solid #e2e8f0', fontSize: 13, color: '#1e293b', lineHeight: 1.5 }}>
+                <div style={{ background: 'var(--bubble-them-bg)', color: 'var(--bubble-them-text)', borderRadius: 12, padding: 16, fontSize: 13, lineHeight: 1.5 }}>
                   {selected.last_message || 'No message content'}
                 </div>
               )}
@@ -782,7 +809,7 @@ export default function ConversationsPage() {
             </div>
 
             {/* Reply box */}
-            <div style={{ padding: '12px 16px', background: '#fff', borderTop: '1px solid #e2e8f0' }}>
+            <div style={{ padding: '12px 16px', background: 'var(--surface)', borderTop: '1px solid var(--border)' }}>
               {selected.ai_suggested_reply && (
                 <div style={{ marginBottom: 8, padding: 10, background: '#f0fdf4', borderRadius: 6, border: '1px solid #bbf7d0', fontSize: 12, color: '#166534' }}>
                   <span style={{ fontWeight: 600 }}>💡 Tai Suggested: </span>
@@ -807,7 +834,7 @@ export default function ConversationsPage() {
 
               <div style={{ display: 'flex', gap: 8 }}>
                 <textarea value={replyText} onChange={e => setReplyText(e.target.value)} placeholder="Type your reply..." rows={3}
-                  style={{ flex: 1, padding: '8px 12px', border: '1px solid #d1d5db', borderRadius: 8, fontSize: 13, resize: 'vertical', outline: 'none', fontFamily: 'inherit' }} />
+                  style={{ flex: 1, padding: '8px 12px', border: '1px solid var(--border-strong)', background: 'var(--surface)', color: 'var(--text)', borderRadius: 8, fontSize: 13, resize: 'vertical', outline: 'none', fontFamily: 'inherit' }} />
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                   <button onClick={sendReply} disabled={sendingReply || !replyText.trim()} style={{ ...btnStyle('#6366f1'), opacity: sendingReply || !replyText.trim() ? 0.5 : 1 }}>
                     {sendingReply ? 'Sending...' : 'Send Reply'}
@@ -827,4 +854,4 @@ export default function ConversationsPage() {
 }
 
 const btnStyle = (bg: string): React.CSSProperties => ({ background: bg, color: '#fff', border: 'none', borderRadius: 6, padding: '6px 14px', fontSize: 12, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap' });
-const selectStyle: React.CSSProperties = { padding: '6px 10px', border: '1px solid #d1d5db', borderRadius: 6, fontSize: 12, background: '#fff', color: '#374151', outline: 'none', cursor: 'pointer' };
+const selectStyle: React.CSSProperties = { padding: '6px 10px', border: '1px solid var(--border-strong)', borderRadius: 6, fontSize: 12, background: 'var(--surface)', color: 'var(--text)', outline: 'none', cursor: 'pointer' };
