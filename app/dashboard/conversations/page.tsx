@@ -141,6 +141,7 @@ export default function ConversationsPage() {
   const [searchMode, setSearchMode] = useState<'keyword' | 'ai'>('keyword');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [isMobile, setIsMobile] = useState(false);
+  const [showDetails, setShowDetails] = useState(false); // mobile: collapse chips/tags so the convo has room
 
   // Tai
   const [taiInput, setTaiInput] = useState('');
@@ -212,6 +213,7 @@ export default function ConversationsPage() {
     setTranslatedText('');
     setThreadTranslated(false);
     setThreadTranslations([]);
+    setShowDetails(false);
     if (conv.full_messages && conv.full_messages.length > 1) return;
     setLoadingThread(true);
     try {
@@ -719,32 +721,38 @@ export default function ConversationsPage() {
                   style={{ ...btnStyle('#8b5cf6'), opacity: summarizing ? 0.6 : 1 }}>
                   {summarizing ? '⏳ Summarizing...' : '📋 Summary'}
                 </button>
+                {isMobile && <button onClick={() => setShowDetails(v => !v)} style={{ ...btnStyle('#475569'), padding: '4px 10px' }}>{showDetails ? '▲ Details' : '▼ Details'}</button>}
                 <button onClick={() => setSelected(null)} style={{ ...btnStyle('#94a3b8'), marginLeft: 'auto' }}>✕</button>
               </div>
 
-              {/* Copy chips */}
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
-                {selected.user_email && selected.user_email !== 'Unknown' && <CopyChip label="Email" value={selected.user_email} />}
-                {selected.user_id && <CopyChip label="Wallet" value={selected.user_id} color="#7c3aed" />}
-                {selected.user_location && selected.user_location !== 'Unknown' && <CopyChip label="Location" value={selected.user_location} color="#0369a1" />}
-                <CopyChip label="Conv ID" value={selected.id} color="#64748b" />
-              </div>
+              {/* Collapsible details (chips + tags). On mobile, hidden until "Details" is tapped. */}
+              {(!isMobile || showDetails) && (
+                <>
+                  {/* Copy chips */}
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+                    {selected.user_email && selected.user_email !== 'Unknown' && <CopyChip label="Email" value={selected.user_email} />}
+                    {selected.user_id && <CopyChip label="Wallet" value={selected.user_id} color="#7c3aed" />}
+                    {selected.user_location && selected.user_location !== 'Unknown' && <CopyChip label="Location" value={selected.user_location} color="#0369a1" />}
+                    <CopyChip label="Conv ID" value={selected.id} color="#64748b" />
+                  </div>
 
-              {/* Custom tags */}
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
-                {(selected.custom_tags || []).map(tag => (
-                  <span key={tag} style={{ background: '#fef3c7', color: '#92400e', border: '1px solid #fde68a', borderRadius: 20, padding: '2px 10px', fontSize: 12, display: 'flex', alignItems: 'center', gap: 4 }}>
-                    #{tag}
-                    <button onClick={() => removeTag(tag)} style={{ background: 'none', border: 'none', color: '#b45309', cursor: 'pointer', padding: 0, fontSize: 12 }}>×</button>
-                  </span>
-                ))}
-                <div style={{ display: 'flex', gap: 4 }}>
-                  <input type="text" value={newTag} onChange={e => setNewTag(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') addTag(newTag); }}
-                    placeholder="+ add tag"
-                    style={{ padding: '2px 8px', border: '1px dashed #d1d5db', borderRadius: 20, fontSize: 12, outline: 'none', width: 80, color: '#64748b' }} />
-                  {newTag && <button onClick={() => addTag(newTag)} style={{ ...btnStyle('#f59e0b'), padding: '2px 8px', fontSize: 11 }}>Add</button>}
-                </div>
-              </div>
+                  {/* Custom tags */}
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+                    {(selected.custom_tags || []).map(tag => (
+                      <span key={tag} style={{ background: '#fef3c7', color: '#92400e', border: '1px solid #fde68a', borderRadius: 20, padding: '2px 10px', fontSize: 12, display: 'flex', alignItems: 'center', gap: 4 }}>
+                        #{tag}
+                        <button onClick={() => removeTag(tag)} style={{ background: 'none', border: 'none', color: '#b45309', cursor: 'pointer', padding: 0, fontSize: 12 }}>×</button>
+                      </span>
+                    ))}
+                    <div style={{ display: 'flex', gap: 4 }}>
+                      <input type="text" value={newTag} onChange={e => setNewTag(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') addTag(newTag); }}
+                        placeholder="+ add tag"
+                        style={{ padding: '2px 8px', border: '1px dashed #d1d5db', borderRadius: 20, fontSize: 12, outline: 'none', width: 80, color: '#64748b' }} />
+                      {newTag && <button onClick={() => addTag(newTag)} style={{ ...btnStyle('#f59e0b'), padding: '2px 8px', fontSize: 11 }}>Add</button>}
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
 
             {/* AI summary bar */}
