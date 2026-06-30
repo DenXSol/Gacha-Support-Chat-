@@ -1,5 +1,4 @@
 import { fetchAllConversations, IntercomConversation } from '@/lib/intercom';
-import { analyzeConversation } from '@/lib/claude';
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 
@@ -16,6 +15,14 @@ export interface DailyReport {
   openCarryover: number;
   urgentOpen: number;
   sentiment: { positive: number; neutral: number; frustrated: number; angry: number; score: number };
+  // Customer happiness from Intercom's native CSAT ratings — free, no AI tokens.
+  customerHappiness: {
+    score: number;        // 0–100 (avg star rating mapped); -1 when no ratings yet
+    avgRating: number;    // 1–5
+    ratedCount: number;   // conversations today that have a CSAT rating
+    responseRate: number; // % of today's conversations that were rated
+    breakdown: Record<1 | 2 | 3 | 4 | 5, number>;
+  };
   topIssues: { type: string; count: number; summary: string }[];
   topLocations: { location: string; count: number }[];
 }
@@ -130,19 +137,39 @@ export async function buildDailyReport(analyzeSentiment = true): Promise<DailyRe
     .sort((a, b) => b.count - a.count)
     .slice(0, 3);
 
+  // ── Customer happiness from Intercom CSAT (free — no AI) ──
+  const breakdown: Record<1 | 2 | 3 | 4 | 5, number> = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+  let ratingSum = 0;
+  let ratedCount = 0;
+  todayConvs.forEach(c => {
+    const r = c.csat_rating;
+    if (typeof r === 'number' && r >= 1 && r <= 5) {
+      breakdown[r as 1 | 2 | 3 | 4 | 5]++;
+      ratingSum += r;
+      ratedCount++;
+    }
+  });
+  const avgRating = ratedCount > 0 ? ratingSum / ratedCount : 0;
+  const customerHappiness = {
+    score: ratedCount > 0 ? Math.round(((avgRating - 1) / 4) * 100) : -1, // 1★→0, 5★→100; -1 = no data
+    avgRating: Math.round(avgRating * 10) / 10,
+    ratedCount,
+    responseRate: totalToday > 0 ? Math.round((ratedCount / totalToday) * 100) : 0,
+    breakdown,
+  };
+
+  // ── Team sentiment (AI) — batched to save tokens: one call per ~40 convos
+  //    instead of one call per conversation. Skippable via analyzeSentiment.
   let sentiment = { positive: 0, neutral: 0, frustrated: 0, angry: 0, score: 0 };
   let urgentOpen = 0;
 
   if (analyzeSentiment && todayConvs.length > 0) {
+    const batch = await batchSentiment(todayConvs);
     for (const c of todayConvs) {
-      try {
-        const text = (c.full_messages || []).map(m => `[${m.author_type === 'admin' ? 'Agent' : m.author_name}]: ${m.body}`).join('\n') || c.last_message;
-        const analysis = await analyzeConversation(text, c.user_name);
-        sentiment[analysis.sentiment] = (sentiment[analysis.sentiment] || 0) + 1;
-        if (analysis.priority === 'urgent' && c.status === 'open') urgentOpen++;
-      } catch {
-        sentiment.neutral++;
-      }
+      const s = batch[c.id];
+      const mood = s?.sentiment || 'neutral';
+      sentiment[mood] = (sentiment[mood] || 0) + 1;
+      if (s?.urgent && c.status === 'open') urgentOpen++;
     }
     const total = sentiment.positive + sentiment.neutral + sentiment.frustrated + sentiment.angry;
     sentiment.score = total > 0
@@ -163,9 +190,57 @@ export async function buildDailyReport(analyzeSentiment = true): Promise<DailyRe
     openCarryover,
     urgentOpen,
     sentiment,
+    customerHappiness,
     topIssues,
     topLocations,
   };
+}
+
+// ── Batched team sentiment ────────────────────────────────────────────────────
+// One Claude call per ~40 conversations (vs one per conversation) — large token
+// saving. Returns a map of conversation id → { sentiment, urgent }.
+type Mood = 'positive' | 'neutral' | 'frustrated' | 'angry';
+async function batchSentiment(
+  convs: IntercomConversation[]
+): Promise<Record<string, { sentiment: Mood; urgent: boolean }>> {
+  const out: Record<string, { sentiment: Mood; urgent: boolean }> = {};
+  if (!ANTHROPIC_API_KEY) return out;
+
+  const BATCH = 40;
+  for (let i = 0; i < convs.length; i += BATCH) {
+    const slice = convs.slice(i, i + BATCH);
+    const lines = slice.map(c => {
+      const msg = (c.last_message || '').replace(/<[^>]*>/g, '').substring(0, 240);
+      return `ID:${c.id} | ${msg}`;
+    }).join('\n');
+    try {
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 1500,
+          system: 'You score customer support messages. Return ONLY a JSON array, no prose, no markdown fences. Each item: {"id":"<id>","sentiment":"positive"|"neutral"|"frustrated"|"angry","urgent":true|false}. urgent = fraud, lost money, locked account, or very angry.',
+          messages: [{ role: 'user', content: `Score each message:\n${lines}` }],
+        }),
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const raw = (data.content?.[0]?.text || '').replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+      const arr = JSON.parse(raw.match(/\[[\s\S]*\]/)?.[0] || '[]');
+      for (const item of arr) {
+        if (item?.id) {
+          const m: Mood = ['positive', 'neutral', 'frustrated', 'angry'].includes(item.sentiment) ? item.sentiment : 'neutral';
+          out[item.id] = { sentiment: m, urgent: item.urgent === true };
+        }
+      }
+    } catch { /* leave unscored → treated as neutral by caller */ }
+  }
+  return out;
 }
 
 export function formatSlackReport(r: DailyReport): any {
@@ -175,6 +250,11 @@ export function formatSlackReport(r: DailyReport): any {
   const meterFill = Math.round(r.sentiment.score / 10);
   const meter = '🟩'.repeat(meterFill) + '⬜'.repeat(10 - meterFill);
   const mood = r.sentiment.score >= 70 ? '😊 Healthy' : r.sentiment.score >= 50 ? '😐 OK' : r.sentiment.score >= 30 ? '😤 Tense' : '😠 Rough';
+
+  const ch = r.customerHappiness;
+  const csatText = ch.ratedCount > 0
+    ? `*😀 Customer Happiness (CSAT):* ${ch.score}/100  ·  ${ch.avgRating}/5 avg\n${'⭐'.repeat(Math.round(ch.avgRating))} from ${ch.ratedCount} rating${ch.ratedCount !== 1 ? 's' : ''} (${ch.responseRate}% of tickets rated)`
+    : '*😀 Customer Happiness (CSAT):* _No ratings submitted yet today_';
 
   const topIssuesText = r.topIssues.length
     ? r.topIssues.map((i, idx) => `${idx + 1}. *${issueLabel(i.type)}* — ${i.count}\n     _${i.summary}_`).join('\n')
@@ -210,7 +290,8 @@ export function formatSlackReport(r: DailyReport): any {
         ],
       },
       { type: 'divider' },
-      { type: 'section', text: { type: 'mrkdwn', text: `*🌡 Team Sentiment:* ${mood}  (${r.sentiment.score}/100)\n${meter}\n😊 ${r.sentiment.positive}  ·  😐 ${r.sentiment.neutral}  ·  😤 ${r.sentiment.frustrated}  ·  😠 ${r.sentiment.angry}` } },
+      { type: 'section', text: { type: 'mrkdwn', text: csatText } },
+      { type: 'section', text: { type: 'mrkdwn', text: `*🌡 Team Sentiment (AI):* ${mood}  (${r.sentiment.score}/100)\n${meter}\n😊 ${r.sentiment.positive}  ·  😐 ${r.sentiment.neutral}  ·  😤 ${r.sentiment.frustrated}  ·  😠 ${r.sentiment.angry}` } },
       { type: 'divider' },
       { type: 'section', text: { type: 'mrkdwn', text: `*🔝 Top Issues Today*\n${topIssuesText}` } },
       { type: 'section', text: { type: 'mrkdwn', text: `*📍 Top Locations*\n${topLocationsText}` } },

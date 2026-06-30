@@ -140,29 +140,47 @@ export default function ConversationsPage() {
 
   // ─── Load ─────────────────────────────────────────────────────────────────
 
-  const loadConversations = async () => {
-    setLoading(true);
+  const [lastSync, setLastSync] = useState<Date | null>(null);
+
+  // `silent` = background auto-refresh: no full-screen spinner, no toast.
+  const loadConversations = async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const res = await fetch('/api/intercom/fetch-conversations');
       const data = await res.json();
       if (data.success) {
         setConversations(data.data);
-        const issueParam = searchParams.get('issue');
-        if (issueParam) {
-          setIssueFilter(issueParam);
-          setFiltered(data.data.filter((c: Conversation) => c.issue_type === issueParam));
-        } else {
-          setFiltered(data.data);
+        setLastSync(new Date());
+        if (!silent) {
+          const issueParam = searchParams.get('issue');
+          if (issueParam) {
+            setIssueFilter(issueParam);
+            setFiltered(data.data.filter((c: Conversation) => c.issue_type === issueParam));
+          } else {
+            setFiltered(data.data);
+          }
+          toast.success(`Loaded ${data.count} conversations`);
         }
-        toast.success(`Loaded ${data.count} conversations`);
-      } else {
+      } else if (!silent) {
         toast.error('Failed to load conversations');
       }
-    } catch { toast.error('Error loading conversations'); }
-    finally { setLoading(false); }
+    } catch { if (!silent) toast.error('Error loading conversations'); }
+    finally { if (!silent) setLoading(false); }
   };
 
   useEffect(() => { loadConversations(); }, []);
+
+  // ─── Real-time auto-refresh: poll the inbox every 30s, and re-sync when the
+  // tab regains focus, so the newest tickets show up without a manual reload.
+  useEffect(() => {
+    const POLL_MS = 60000;
+    const interval = setInterval(() => {
+      if (document.visibilityState === 'visible') loadConversations(true);
+    }, POLL_MS);
+    const onVisible = () => { if (document.visibilityState === 'visible') loadConversations(true); };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => { clearInterval(interval); document.removeEventListener('visibilitychange', onVisible); };
+  }, []);
 
   // ─── Lazy load thread ─────────────────────────────────────────────────────
 
@@ -199,7 +217,7 @@ export default function ConversationsPage() {
     if (issueFilter) result = result.filter(c => c.issue_type === issueFilter);
     if (statusFilter) result = result.filter(c => c.status === statusFilter);
     if (priorityFilter) result = result.filter(c => c.ai_priority === priorityFilter);
-    if (locationFilter) result = result.filter(c => c.user_location.toLowerCase().includes(locationFilter.toLowerCase()));
+    if (locationFilter) result = result.filter(c => (c.user_location || '').toLowerCase().includes(locationFilter.toLowerCase()));
     if (searchMode === 'keyword' && searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
       result = result.filter(c =>
@@ -519,10 +537,11 @@ export default function ConversationsPage() {
         <h1 style={{ margin: 0, fontSize: 18, fontWeight: 700, color: '#1e293b' }}>Conversations</h1>
         {urgentCount > 0 && <span style={{ background: '#fef2f2', color: '#ef4444', border: '1px solid #fecaca', borderRadius: 20, padding: '2px 10px', fontSize: 12, fontWeight: 600 }}>🚨 {urgentCount} urgent</span>}
         {unrepliedCount > 0 && <span style={{ background: '#fef9c3', color: '#854d0e', border: '1px solid #fde047', borderRadius: 20, padding: '2px 10px', fontSize: 12, fontWeight: 600 }}>💬 {unrepliedCount} unreplied</span>}
-        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+          {lastSync && <span style={{ fontSize: 11, color: '#94a3b8' }}>🟢 Live · synced {lastSync.toLocaleTimeString()}</span>}
           <button onClick={analyzeAll} style={btnStyle('#6366f1')}>🤖 AI Analyze All</button>
           <button onClick={exportCSV} style={btnStyle('#10b981')}>📊 Export CSV</button>
-          <button onClick={loadConversations} style={btnStyle('#64748b')}>🔄 Refresh</button>
+          <button onClick={() => loadConversations()} style={btnStyle('#64748b')}>🔄 Refresh</button>
         </div>
       </div>
 

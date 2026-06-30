@@ -15,6 +15,9 @@ export interface IntercomConversation {
   tags?: string[];
   ai_participated?: boolean;
   escalated_to_human?: boolean;
+  // Native Intercom CSAT (customer-submitted conversation rating), when present
+  csat_rating?: number;       // 1–5
+  csat_remark?: string;
 }
 
 export interface MessagePart {
@@ -99,6 +102,11 @@ export async function fetchAllConversations(): Promise<IntercomConversation[]> {
       const url = new URL(`${API_BASE}/conversations`);
       url.searchParams.append('per_page', '50');
       url.searchParams.append('display_as', 'plaintext');
+      // Fetch most-recently-updated first so the newest tickets are always
+      // included (the MAX_PAGES cap keeps the freshest 500, not the oldest).
+      // For the unfiltered list endpoint: sort = field, order = direction.
+      url.searchParams.append('sort', 'updated_at');
+      url.searchParams.append('order', 'desc');
       if (startingAfter) {
         url.searchParams.append('starting_after', startingAfter);
       }
@@ -125,26 +133,7 @@ export async function fetchAllConversations(): Promise<IntercomConversation[]> {
       allConversations.map(async (conv) => {
         const contactId = conv.source?.author?.id || conv.contacts?.contacts?.[0]?.id;
         const contact = contactId ? await fetchContact(contactId) : null;
-
-        return {
-          id: conv.id,
-          // FIX: resolve actual wallet address from custom attributes
-          user_id: resolveWallet(contact, contactId || ''),
-          user_name: contact?.name || conv.source?.author?.name || 'Unknown',
-          user_email: contact?.email || 'Unknown',
-          user_location: contact?.location_str || 'Unknown',
-          issue_type: categorizeConversation(conv),
-          status: conv.state || 'open',
-          created_at: new Date(conv.created_at * 1000).toISOString(),
-          updated_at: new Date(conv.updated_at * 1000).toISOString(),
-          last_message: getLastMessage(conv),
-          full_messages: extractMessages(conv),
-          unread: conv.read === false,
-          replied: hasAdminReply(conv),
-          tags: conv.tags?.tags?.map((t: any) => t.name) || [],
-          ai_participated: detectAIParticipation(conv),
-          escalated_to_human: detectEscalation(conv),
-        };
+        return mapConversation(conv, contact, contactId);
       })
     );
 
@@ -166,52 +155,80 @@ export async function fetchSingleConversation(conversationId: string): Promise<I
     const conv = await res.json();
     const contactId = conv.source?.author?.id || conv.contacts?.contacts?.[0]?.id;
     const contact = contactId ? await fetchContact(contactId) : null;
-
-    return {
-      id: conv.id,
-      // FIX: resolve actual wallet address from custom attributes
-      user_id: resolveWallet(contact, contactId || ''),
-      user_name: contact?.name || conv.source?.author?.name || 'Unknown',
-      user_email: contact?.email || 'Unknown',
-      user_location: contact?.location_str || 'Unknown',
-      issue_type: categorizeConversation(conv),
-      status: conv.state || 'open',
-      created_at: new Date(conv.created_at * 1000).toISOString(),
-      updated_at: new Date(conv.updated_at * 1000).toISOString(),
-      last_message: getLastMessage(conv),
-      full_messages: extractMessages(conv),
-      unread: conv.read === false,
-      replied: hasAdminReply(conv),
-      tags: conv.tags?.tags?.map((t: any) => t.name) || [],
-      ai_participated: detectAIParticipation(conv),
-      escalated_to_human: detectEscalation(conv),
-    };
+    return mapConversation(conv, contact, contactId);
   } catch (error) {
     console.error('Error fetching single conversation:', error);
     return null;
   }
 }
 
+// ── Shared mapper — single source of truth for the Intercom→app shape, used by
+// both the bulk list and the single-conversation lazy load (keeps them in sync).
+function mapConversation(
+  conv: any,
+  contact: IntercomContact | null,
+  contactId?: string
+): IntercomConversation {
+  const rating = conv.conversation_rating || {};
+  return {
+    id: conv.id,
+    // Resolve actual wallet address from custom attributes, not Intercom's contact ID
+    user_id: resolveWallet(contact, contactId || ''),
+    user_name: contact?.name || conv.source?.author?.name || 'Unknown',
+    user_email: contact?.email || 'Unknown',
+    user_location: contact?.location_str || 'Unknown',
+    issue_type: categorizeConversation(conv),
+    status: conv.state || 'open',
+    created_at: new Date(conv.created_at * 1000).toISOString(),
+    updated_at: new Date(conv.updated_at * 1000).toISOString(),
+    last_message: getLastMessage(conv),
+    full_messages: extractMessages(conv),
+    unread: conv.read === false,
+    replied: hasAdminReply(conv),
+    tags: conv.tags?.tags?.map((t: any) => t.name) || [],
+    ai_participated: detectAIParticipation(conv),
+    escalated_to_human: detectEscalation(conv),
+    csat_rating: typeof rating.rating === 'number' ? rating.rating : undefined,
+    csat_remark: rating.remark || undefined,
+  };
+}
+
+// ── Contact cache ───────────────────────────────────────────────────────────
+// Conversations are enriched with a contact lookup each fetch. With the 60s
+// auto-refresh on the dashboard that would re-fetch every contact every cycle
+// and risk Intercom rate limits, so cache resolved contacts for a few minutes.
+// (In serverless this lives per warm instance — still cuts repeat calls a lot.)
+const CONTACT_TTL_MS = 5 * 60 * 1000;
+const contactCache = new Map<string, { contact: IntercomContact | null; at: number }>();
+
 async function fetchContact(contactId: string): Promise<IntercomContact | null> {
+  const cached = contactCache.get(contactId);
+  if (cached && Date.now() - cached.at < CONTACT_TTL_MS) return cached.contact;
   try {
     const res = await fetchWithTimeout(`${API_BASE}/contacts/${contactId}`);
     if (!res.ok) return null;
     const data = await res.json();
 
-    // Intercom stores location as a nested object: { city_name, region_name, country_name }
+    // Intercom (API 2.11) stores location as a nested object: { type, city, region, country }.
+    // Older field names (*_name) and a custom attribute are kept as fallbacks for safety.
     const loc = data.location || {};
-    const locParts = [loc.city_name, loc.region_name, loc.country_name].filter(Boolean);
+    const city = loc.city || loc.city_name;
+    const region = loc.region || loc.region_name;
+    const country = loc.country || loc.country_name;
+    const locParts = [city, region, country].filter(Boolean);
     const location_str = locParts.length > 0
       ? locParts.join(', ')
       : (data.custom_attributes?.location || 'Unknown');
 
-    return {
+    const contact: IntercomContact = {
       id: data.id,
       name: data.name || 'Unknown',
       email: data.email || 'Unknown',
       location_str,
       custom_attributes: data.custom_attributes || {},
     };
+    contactCache.set(contactId, { contact, at: Date.now() });
+    return contact;
   } catch {
     return null;
   }

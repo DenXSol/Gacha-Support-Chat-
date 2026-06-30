@@ -146,10 +146,31 @@ export default function AnalyticsPage() {
               ))}
             </div>
 
-            {/* Sentiment meter */}
+            {/* Customer happiness (Intercom CSAT — no AI) */}
+            {report.customerHappiness && (
+              <div style={{ padding: 12, background: '#f0fdf4', borderRadius: 6, marginBottom: 12, border: '1px solid #bbf7d0' }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: '#1e293b', marginBottom: 6 }}>
+                  😀 Customer Happiness (CSAT){report.customerHappiness.ratedCount > 0 ? `: ${report.customerHappiness.score}/100 · ${report.customerHappiness.avgRating}/5 avg` : ''}
+                </div>
+                {report.customerHappiness.ratedCount > 0 ? (
+                  <>
+                    <div style={{ height: 10, background: '#e2e8f0', borderRadius: 5, overflow: 'hidden' }}>
+                      <div style={{ height: '100%', width: `${report.customerHappiness.score}%`, background: report.customerHappiness.score >= 70 ? '#10b981' : report.customerHappiness.score >= 40 ? '#f59e0b' : '#ef4444', transition: 'width 0.5s' }} />
+                    </div>
+                    <div style={{ fontSize: 11, color: '#64748b', marginTop: 6 }}>
+                      ⭐ {report.customerHappiness.ratedCount} rating(s) · {report.customerHappiness.responseRate}% of tickets rated
+                    </div>
+                  </>
+                ) : (
+                  <div style={{ fontSize: 11, color: '#94a3b8' }}>No customer ratings submitted yet today</div>
+                )}
+              </div>
+            )}
+
+            {/* Team sentiment meter (AI) */}
             <div style={{ padding: 12, background: '#f8fafc', borderRadius: 6, marginBottom: 12 }}>
               <div style={{ fontSize: 12, fontWeight: 600, color: '#1e293b', marginBottom: 6 }}>
-                Team Sentiment: {report.sentiment.score}/100 {report.sentiment.score >= 70 ? '😊' : report.sentiment.score >= 50 ? '😐' : report.sentiment.score >= 30 ? '😤' : '😠'}
+                Team Sentiment (AI): {report.sentiment.score}/100 {report.sentiment.score >= 70 ? '😊' : report.sentiment.score >= 50 ? '😐' : report.sentiment.score >= 30 ? '😤' : '😠'}
               </div>
               <div style={{ height: 10, background: '#e2e8f0', borderRadius: 5, overflow: 'hidden' }}>
                 <div style={{ height: '100%', width: `${report.sentiment.score}%`, background: report.sentiment.score >= 70 ? '#10b981' : report.sentiment.score >= 40 ? '#f59e0b' : '#ef4444', transition: 'width 0.5s' }} />

@@ -188,50 +188,6 @@ ${conversations.map(c => `ID:${c.id} | Type:${c.issue_type} | ${c.summary}`).joi
   return parseJSON(raw, []);
 }
 
-// ─── Suggest reply ────────────────────────────────────────────────────────────
-
-export async function suggestReply(
-  conversationText: string,
-  issueType: string,
-  agentName = 'Tai'
-): Promise<string> {
-  const system = `You are a helpful, friendly customer support agent for Gacha, a trading card platform.
-Write professional but warm replies. Be concise (2-4 sentences).
-Don't make promises you can't keep. Don't reveal internal systems.`;
-
-  const prompt = `Write a support reply for this ${issueType} issue.
-Agent name: ${agentName}
-Conversation:
-${conversationText}
-Write ONLY the reply message text — no subject line, no JSON, no markdown.`;
-
-  return await callClaude(prompt, system, 500);
-}
-
-// ─── Categorize with AI ───────────────────────────────────────────────────────
-
-export async function categorizeWithAI(text: string): Promise<{
-  category: string;
-  confidence: number;
-  reasoning: string;
-}> {
-  const system = `You are a support ticket classifier for Gacha. Return ONLY valid JSON — no markdown fences.`;
-
-  const prompt = `Classify this support conversation into ONE category.
-
-Categories:
-- withdrawal: user trying to withdraw funds or cards
-- deposit: user depositing money or crypto
-- shipping: delivery, tracking, lost packages
-- complaint: damaged goods, wrong order, refund request, fraud
-- card_redemption: redeeming certificates, PSA grading, vault claims
-- kyc: identity verification, document submission
-- general: everything else
-
-Return ONLY: {"category": "...", "confidence": 0-100, "reasoning": "brief explanation"}
-
-Text: ${text}`;
-
-  const raw = await callClaude(prompt, system, 300);
-  return parseJSON(raw, { category: 'general', confidence: 0, reasoning: 'Parse error' });
-}
+// Note: suggestReply() and categorizeWithAI() were removed as dead code — no
+// callers. The reply-box "Polish" tool uses /api/claude/polish-reply, and
+// categorization is handled by categorizeConversation() in lib/intercom.ts.
