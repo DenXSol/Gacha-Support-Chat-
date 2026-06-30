@@ -124,6 +124,10 @@ export default function ConversationsPage() {
   const [translatedText, setTranslatedText] = useState('');
   const [translatedFrom, setTranslatedFrom] = useState('');
   const [translateSource, setTranslateSource] = useState<'reply' | 'message'>('reply');
+  // Whole-thread translation (replaces displayed message text with English)
+  const [threadTranslating, setThreadTranslating] = useState(false);
+  const [threadTranslated, setThreadTranslated] = useState(false);
+  const [threadTranslations, setThreadTranslations] = useState<string[]>([]);
 
   // Filters
   const [issueFilter, setIssueFilter] = useState('');
@@ -136,6 +140,7 @@ export default function ConversationsPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchMode, setSearchMode] = useState<'keyword' | 'ai'>('keyword');
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [isMobile, setIsMobile] = useState(false);
 
   // Tai
   const [taiInput, setTaiInput] = useState('');
@@ -176,6 +181,15 @@ export default function ConversationsPage() {
 
   useEffect(() => { loadConversations(); }, []);
 
+  // Track small screens so the list/detail panes can stack on mobile.
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 768px)');
+    const update = () => setIsMobile(mq.matches);
+    update();
+    mq.addEventListener('change', update);
+    return () => mq.removeEventListener('change', update);
+  }, []);
+
   // ─── Real-time auto-refresh: poll the inbox every 30s, and re-sync when the
   // tab regains focus, so the newest tickets show up without a manual reload.
   useEffect(() => {
@@ -196,6 +210,8 @@ export default function ConversationsPage() {
     setShowSummaryPanel(false);
     setShowTranslatePanel(false);
     setTranslatedText('');
+    setThreadTranslated(false);
+    setThreadTranslations([]);
     if (conv.full_messages && conv.full_messages.length > 1) return;
     setLoadingThread(true);
     try {
@@ -402,6 +418,33 @@ export default function ConversationsPage() {
       }
     } catch { toast.error('Translation failed'); }
     finally { setTranslating(false); }
+  };
+
+  // ─── Translate whole thread (replace message text with English) ───────────
+
+  const translateThread = async () => {
+    if (!selected?.full_messages?.length) { toast.error('No messages to translate'); return; }
+    // Already translated → toggle back to original
+    if (threadTranslated) { setThreadTranslated(false); return; }
+    if (threadTranslations.length === selected.full_messages.length) { setThreadTranslated(true); return; }
+    setThreadTranslating(true);
+    try {
+      const texts = selected.full_messages.map(m => m.body.replace(/<[^>]*>/g, ''));
+      const res = await fetch('/api/claude/translate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ texts, targetLanguage: 'English' }),
+      });
+      const data = await res.json();
+      if (data.success && Array.isArray(data.translations)) {
+        setThreadTranslations(data.translations);
+        setThreadTranslated(true);
+        toast.success('Conversation translated to English');
+      } else {
+        toast.error('Could not translate conversation');
+      }
+    } catch { toast.error('Translation failed'); }
+    finally { setThreadTranslating(false); }
   };
 
   // ─── BATCH 6: Summarize ───────────────────────────────────────────────────
@@ -613,7 +656,7 @@ export default function ConversationsPage() {
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
 
         {/* List */}
-        <div style={{ width: selected ? '35%' : '100%', borderRight: '1px solid var(--border)', overflowY: 'auto', background: 'var(--surface)', transition: 'width 0.2s' }}>
+        <div style={{ width: isMobile ? '100%' : (selected ? '35%' : '100%'), display: isMobile && selected ? 'none' : 'block', borderRight: isMobile ? 'none' : '1px solid var(--border)', overflowY: 'auto', background: 'var(--surface)', transition: 'width 0.2s' }}>
           {loading ? (
             <div style={{ padding: 40, textAlign: 'center', color: 'var(--text-faint)' }}>Loading conversations...</div>
           ) : filtered.length === 0 ? (
@@ -660,6 +703,7 @@ export default function ConversationsPage() {
             {/* Header */}
             <div style={{ padding: '12px 16px', background: 'var(--surface)', borderBottom: '1px solid var(--border)' }}>
               <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 10 }}>
+                {isMobile && <button onClick={() => setSelected(null)} style={{ ...btnStyle('#64748b'), padding: '4px 10px' }}>← Back</button>}
                 <div style={{ fontWeight: 700, fontSize: 15, color: 'var(--text)' }}>{selected.user_name}</div>
                 <span style={{ background: ISSUE_COLORS[selected.issue_type] + '20', color: ISSUE_COLORS[selected.issue_type], borderRadius: 6, padding: '3px 10px', fontSize: 12, fontWeight: 600 }}>{issueLabel(selected.issue_type)}</span>
                 <a href={`https://app.intercom.com/a/apps/${process.env.NEXT_PUBLIC_INTERCOM_WORKSPACE_ID}/inbox/conversation/${selected.id}`}
@@ -793,9 +837,9 @@ export default function ConversationsPage() {
                     <div key={i} style={{ display: 'flex', justifyContent: isAgent ? 'flex-end' : 'flex-start' }}>
                       <div style={{ maxWidth: '75%', background: isAgent ? 'var(--bubble-me-bg)' : 'var(--bubble-them-bg)', color: isAgent ? 'var(--bubble-me-text)' : 'var(--bubble-them-text)', borderRadius: isAgent ? '18px 18px 4px 18px' : '18px 18px 18px 4px', padding: '10px 14px', boxShadow: '0 1px 2px rgba(0,0,0,0.12)' }}>
                         <div style={{ fontSize: 10, marginBottom: 4, opacity: 0.7 }}>
-                          {isAgent ? 'Tai' : msg.author_name} · {formatTime(msg.created_at)}
+                          {isAgent ? 'Tai' : msg.author_name} · {formatTime(msg.created_at)}{threadTranslated && <span> · 🌐 EN</span>}
                         </div>
-                        <div style={{ fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{msg.body.replace(/<[^>]*>/g, '')}</div>
+                        <div style={{ fontSize: 13, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>{threadTranslated ? (threadTranslations[i] ?? msg.body.replace(/<[^>]*>/g, '')) : msg.body.replace(/<[^>]*>/g, '')}</div>
                       </div>
                     </div>
                   );
@@ -827,8 +871,8 @@ export default function ConversationsPage() {
                 <button onClick={() => translate('reply')} disabled={translating || !replyText.trim()} style={{ ...btnStyle('#0369a1'), padding: '3px 10px', fontSize: 11, opacity: !replyText.trim() ? 0.4 : 1 }}>
                   🌐 Translate my reply
                 </button>
-                <button onClick={() => translate('message')} disabled={translating} style={{ ...btnStyle('#0891b2'), padding: '3px 10px', fontSize: 11 }}>
-                  🌐 Translate their message
+                <button onClick={translateThread} disabled={threadTranslating} style={{ ...btnStyle(threadTranslated ? '#64748b' : '#0891b2'), padding: '3px 10px', fontSize: 11 }}>
+                  {threadTranslating ? '🌐 Translating...' : threadTranslated ? '↩ Show original' : '🌐 Translate conversation'}
                 </button>
               </div>
 

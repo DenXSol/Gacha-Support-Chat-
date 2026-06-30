@@ -17,14 +17,49 @@ function parseJSON<T>(raw: string, fallback: T): T {
 
 export async function POST(request: NextRequest) {
   try {
-    const { text, targetLanguage, autoDetect } = await request.json();
-
-    if (!text?.trim()) {
-      return NextResponse.json({ error: 'No text provided' }, { status: 400 });
-    }
+    const { text, texts, targetLanguage, autoDetect } = await request.json();
 
     if (!ANTHROPIC_API_KEY) {
       return NextResponse.json({ error: 'API key not configured' }, { status: 500 });
+    }
+
+    // ── Batch mode: translate a whole thread (array of messages) in one call ──
+    if (Array.isArray(texts)) {
+      if (texts.length === 0) return NextResponse.json({ success: true, translations: [] });
+      const target = targetLanguage || 'English';
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': ANTHROPIC_API_KEY,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: 'claude-haiku-4-5-20251001',
+          max_tokens: 2000,
+          system: `You are a translation assistant. Translate each input message to ${target}. If a message is already in ${target}, return it unchanged. Return ONLY a raw JSON array of the translated strings in the SAME ORDER — no markdown fences, no prose. Example: ["hello","how are you"]`,
+          messages: [{ role: 'user', content: `Translate each of these ${texts.length} messages to ${target}. Return a JSON array of ${texts.length} strings:\n\n${JSON.stringify(texts)}` }],
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.text();
+        throw new Error(`Claude API error: ${err}`);
+      }
+      const data = await res.json();
+      const raw = (data.content?.[0]?.text || '').replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+      let translations: string[];
+      try {
+        translations = JSON.parse(raw.match(/\[[\s\S]*\]/)?.[0] || '[]');
+      } catch {
+        translations = texts; // fall back to originals on parse failure
+      }
+      // Guard length mismatch — fall back to original where missing
+      translations = texts.map((t: string, i: number) => translations[i] ?? t);
+      return NextResponse.json({ success: true, translations });
+    }
+
+    if (!text?.trim()) {
+      return NextResponse.json({ error: 'No text provided' }, { status: 400 });
     }
 
     const target = targetLanguage || 'English';

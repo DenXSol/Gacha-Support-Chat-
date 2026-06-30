@@ -43,6 +43,12 @@ const THEME_CSS = `
 }
 body { background: var(--bg); }
 input, textarea, select { color-scheme: light dark; }
+.dash-main { padding: 2rem; }
+@media (max-width: 768px) {
+  .dash-main { padding: 0.5rem; }
+  .dash-header { padding: 0.75rem 1rem !important; }
+  .dash-nav { padding: 0 1rem !important; gap: 1rem !important; overflow-x: auto; }
+}
 `;
 
 export default function DashboardLayout({
@@ -112,7 +118,7 @@ export default function DashboardLayout({
       <style>{THEME_CSS}</style>
 
       {/* Header */}
-      <header style={{
+      <header className="dash-header" style={{
         background: 'var(--surface)',
         borderBottom: '1px solid var(--border)',
         padding: '1rem 2rem',
@@ -158,7 +164,7 @@ export default function DashboardLayout({
       </header>
 
       {/* Navigation */}
-      <nav style={{
+      <nav className="dash-nav" style={{
         background: 'var(--surface)',
         borderBottom: '1px solid var(--border)',
         padding: '0 2rem',
@@ -190,7 +196,7 @@ export default function DashboardLayout({
       </nav>
 
       {/* Main Content */}
-      <main style={{ padding: '2rem' }}>
+      <main className="dash-main">
         {children}
       </main>
     </div>
